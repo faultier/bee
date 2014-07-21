@@ -1,0 +1,9 @@
+[package]
+
+name = "bee"
+version = "0.1.0-alpha"
+authors = ["faultier"]
+
+[[lib]]
+
+name = "bee"
