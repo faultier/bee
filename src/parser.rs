@@ -360,7 +360,7 @@ impl Parser {
                             }
                         }
                         _ => {
-                            buf1.push(rbuf[pos]);
+                            buf1.push(rbuf[0]);
                             pos += 1;
                         }
                     }
@@ -800,7 +800,7 @@ mod test {
         use std::io::BufReader;
 
         #[test]
-        fn test_simple_request() {
+        fn test_simple_request_get() {
             let msg = "GET /\r\n";
             let data = msg.as_bytes();
             let mut reader = BufReader::new(data);
@@ -825,9 +825,10 @@ mod test {
         use super::TestCallbacks;
         use super::super::*;
         use std::io::BufReader;
+        use std::collections::HashMap;
 
         #[test]
-        fn test_request_no_header() {
+        fn test_request_without_header() {
             let msg = "GET / HTTP/1.0\r\n\r\n";
             let data = msg.as_bytes();
             let mut reader = BufReader::new(data);
@@ -843,15 +844,15 @@ mod test {
         }
 
         #[test]
-        fn test_request_no_body() {
+        fn test_request_get() {
             let mut parser = Parser::new(Request);
             let mut callbacks = TestCallbacks::new(true);
-            let msg = create_request("GET", "/", None, None);
+            let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
             let mut reader = BufReader::new(data);
             assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(data.len()));
             assert!(callbacks.started);
-            assert_eq!(callbacks.url, Some("/".to_string()));
+            assert_eq!(callbacks.url, Some("/tag/Rust".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_1_0));
             assert_general_headers(&callbacks);
             assert!(callbacks.finished);
@@ -862,8 +863,7 @@ mod test {
 //      fn test_request_body() {
 //          let mut parser = Parser::new(Request);
 //          let mut callbacks = TestCallbacks::new(false);
-//          let (header, body) = create_body("Hello, world!");
-//          let msg = create_request("POST", "/", header, body);
+//          let msg = create_request("POST", "/", None, Some("Hello, world".to_string()));
 //          let data = msg.as_bytes();
 //          let mut reader = BufReader::new(data);
 //          {
@@ -877,60 +877,21 @@ mod test {
 //          assert_eq!(reader.tell(), Ok(data.len() as u64));
 //      }
 
-        fn create_request(method: &'static str, url: &'static str, header: Option<String>, body: Option<String>) -> String {
+        fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
+            let mut h = HashMap::new();
+            h.insert("Host".to_string(), "faultier.jp".to_string());
+            h.insert("User-Agent".to_string(), "test".to_string());
+            h.insert("Accept".to_string(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+            h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
+            h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
+            if header.is_some() {
+                h.extend(header.unwrap().move_iter());
+            }
             let mut vec = Vec::new();
             let nl = "\r\n".to_string();
             vec.push(format!("{} {} HTTP/1.0", method, url));
-            vec.push("Host: faultier.jp".to_string());
-            vec.push("User-Agent: test".to_string());
-            if header.is_some() {  vec.push(header.unwrap()) }
-            vec.push(nl.clone());
-            if body.is_some() { vec.push(body.unwrap()) }
-            vec.connect(nl.as_slice())
-        }
-
-//      fn create_body(body: &'static str) -> (Option<String>, Option<String>) {
-//          (Some(format!("Content-Length: {}", body.as_bytes().len())), Some(body.to_string()))
-//      }
-
-        fn assert_general_headers(cb: &TestCallbacks) {
-            assert!(cb.headers_finished);
-            assert_eq!(cb.headers.find(&"Host".into_maybe_owned()),
-                Some(&"faultier.jp".into_maybe_owned()));
-            assert_eq!(cb.headers.find(&"User-Agent".into_maybe_owned()),
-                Some(&"test".into_maybe_owned()));
-        }
-    }
-
-    mod http_1_1 {
-        use super::TestCallbacks;
-        use super::super::*;
-        use std::io::BufReader;
-
-        #[test]
-        fn test_request_no_body() {
-            let mut parser = Parser::new(Request);
-            let mut callbacks = TestCallbacks::new(true);
-            let msg = create_request("GET", "/", None, None);
-            let data = msg.as_bytes();
-            let mut reader = BufReader::new(data);
-            assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(data.len()));
-            assert!(callbacks.started);
-            assert_eq!(callbacks.url, Some("/".to_string()));
-            assert_eq!(parser.http_version, Some(HTTP_1_1));
-            assert_general_headers(&callbacks);
-            assert!(callbacks.finished);
-            assert_eq!(reader.tell(), Ok(data.len() as u64));
-        }
-
-        fn create_request(method: &'static str, url: &'static str, header: Option<String>, body: Option<String>) -> String {
-            let mut vec = Vec::new();
-            let nl = "\r\n".to_string();
-            vec.push(format!("{} {} HTTP/1.1", method, url));
-            vec.push("Host: faultier.jp".to_string());
-            vec.push("User-Agent: test".to_string());
-            if header.is_some() {
-                vec.push(header.unwrap());
+            for (name, value) in h.iter() {
+                vec.push(format!("{}: {}", *name, *value));
             }
             vec.push(nl.clone());
             if body.is_some() {
@@ -941,11 +902,78 @@ mod test {
         }
 
         fn assert_general_headers(cb: &TestCallbacks) {
+            let mut h = HashMap::new();
+            h.insert("Host".into_maybe_owned(), "faultier.jp".into_maybe_owned());
+            h.insert("User-Agent".into_maybe_owned(), "test".into_maybe_owned());
+            h.insert("Accept".into_maybe_owned(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".into_maybe_owned());
+            h.insert("Accept-Encoding".into_maybe_owned(), "gzip,deflate".into_maybe_owned());
+            h.insert("Accept-Language".into_maybe_owned(), "ja,en-US;q=0.8,en;q=0.6".into_maybe_owned());
+ 
             assert!(cb.headers_finished);
-            assert_eq!(cb.headers.find(&"Host".into_maybe_owned()),
-                Some(&"faultier.jp".into_maybe_owned()));
-            assert_eq!(cb.headers.find(&"User-Agent".into_maybe_owned()),
-                Some(&"test".into_maybe_owned()));
+            for (name, value) in h.iter() {
+                assert_eq!(cb.headers.find(name), Some(value));
+            }
+        }
+    }
+
+    mod http_1_1 {
+        use super::TestCallbacks;
+        use super::super::*;
+        use std::io::BufReader;
+        use std::collections::HashMap;
+
+        #[test]
+        fn test_request_get() {
+            let mut parser = Parser::new(Request);
+            let mut callbacks = TestCallbacks::new(true);
+            let msg = create_request("GET", "/tag/Rust", None, None);
+            let data = msg.as_bytes();
+            let mut reader = BufReader::new(data);
+            assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(data.len()));
+            assert!(callbacks.started);
+            assert_eq!(callbacks.url, Some("/tag/Rust".to_string()));
+            assert_eq!(parser.http_version, Some(HTTP_1_1));
+            assert_general_headers(&callbacks);
+            assert!(callbacks.finished);
+            assert_eq!(reader.tell(), Ok(data.len() as u64));
+        }
+
+        fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
+            let mut h = HashMap::new();
+            h.insert("Host".to_string(), "faultier.jp".to_string());
+            h.insert("User-Agent".to_string(), "test".to_string());
+            h.insert("Accept".to_string(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+            h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
+            h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
+            if header.is_some() {
+                h.extend(header.unwrap().move_iter());
+            }
+            let mut vec = Vec::new();
+            let nl = "\r\n".to_string();
+            vec.push(format!("{} {} HTTP/1.1", method, url));
+            for (name, value) in h.iter() {
+                vec.push(format!("{}: {}", *name, *value));
+            }
+            vec.push(nl.clone());
+            if body.is_some() {
+                vec.push(body.unwrap());
+                vec.push(nl.clone());
+            }
+            vec.connect(nl.as_slice())
+        }
+
+        fn assert_general_headers(cb: &TestCallbacks) {
+            let mut h = HashMap::new();
+            h.insert("Host".into_maybe_owned(), "faultier.jp".into_maybe_owned());
+            h.insert("User-Agent".into_maybe_owned(), "test".into_maybe_owned());
+            h.insert("Accept".into_maybe_owned(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".into_maybe_owned());
+            h.insert("Accept-Encoding".into_maybe_owned(), "gzip,deflate".into_maybe_owned());
+            h.insert("Accept-Language".into_maybe_owned(), "ja,en-US;q=0.8,en;q=0.6".into_maybe_owned());
+ 
+            assert!(cb.headers_finished);
+            for (name, value) in h.iter() {
+                assert_eq!(cb.headers.find(name), Some(value));
+            }
         }
     }
 }
@@ -979,7 +1007,7 @@ mod bench {
 
         #[allow(unused_must_use)]
         #[bench]
-        fn bench_no_parse(b: &mut Bencher) {
+        fn bench_simple_request_get_read_only(b: &mut Bencher) {
             let msg = "GET /\r\n";
             let data = msg.as_bytes();
             let len = data.len();
@@ -995,7 +1023,7 @@ mod bench {
         }
 
         #[bench]
-        fn bench_simple_request(b: &mut Bencher) {
+        fn bench_simple_request_get(b: &mut Bencher) {
             let msg = "GET /\r\n";
             let data = msg.as_bytes();
             let mut cb = BenchCallbacks { skip_body: true };
@@ -1008,10 +1036,29 @@ mod bench {
         use super::super::*;
         use test::Bencher;
         use std::io::BufReader;
+        use std::collections::HashMap;
 
         #[allow(unused_must_use)]
         #[bench]
-        fn bench_no_parse(b: &mut Bencher) {
+        fn bench_request_without_header_read_only(b: &mut Bencher) {
+            let msg = "GET / HTTP/1.0\r\n\r\n";
+            let data = msg.as_bytes();
+            let len = data.len();
+            b.iter(|| {
+                let mut pos = 0u;
+                let mut reader = BufReader::new(data);
+                let mut buf = [0u8];
+                while pos < len {
+                    reader.read(buf);
+                    pos += 1;
+                }
+            });
+        }
+
+
+        #[allow(unused_must_use)]
+        #[bench]
+        fn bench_request_get_read_only(b: &mut Bencher) {
             let msg = create_request("GET", "/", None, None);
             let data = msg.as_bytes();
             let len = data.len();
@@ -1027,7 +1074,7 @@ mod bench {
         }
 
         #[bench]
-        fn bench_request_no_header(b: &mut Bencher) {
+        fn bench_request_without_header(b: &mut Bencher) {
             let msg = "GET / HTTP/1.0\r\n\r\n";
             let data = msg.as_bytes();
             let mut cb = BenchCallbacks { skip_body: true };
@@ -1035,21 +1082,28 @@ mod bench {
         }
 
         #[bench]
-        fn bench_request_no_body(b: &mut Bencher) {
-            let msg = create_request("GET", "/", None, None);
+        fn bench_request_get(b: &mut Bencher) {
+            let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
             let mut cb = BenchCallbacks { skip_body: true };
             b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut cb) );
         }
 
-        fn create_request(method: &'static str, url: &'static str, header: Option<String>, body: Option<String>) -> String {
+        fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
+            let mut h = HashMap::new();
+            h.insert("Host".to_string(), "faultier.jp".to_string());
+            h.insert("User-Agent".to_string(), "test".to_string());
+            h.insert("Accept".to_string(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+            h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
+            h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
+            if header.is_some() {
+                h.extend(header.unwrap().move_iter());
+            }
             let mut vec = Vec::new();
             let nl = "\r\n".to_string();
             vec.push(format!("{} {} HTTP/1.0", method, url));
-            vec.push("Host: faultier.jp".to_string());
-            vec.push("User-Agent: test".to_string());
-            if header.is_some() {
-                vec.push(header.unwrap());
+            for (name, value) in h.iter() {
+                vec.push(format!("{}: {}", *name, *value));
             }
             vec.push(nl.clone());
             if body.is_some() {
@@ -1065,10 +1119,11 @@ mod bench {
         use super::super::*;
         use test::Bencher;
         use std::io::BufReader;
+        use std::collections::HashMap;
 
         #[allow(unused_must_use)]
         #[bench]
-        fn bench_no_parse(b: &mut Bencher) {
+        fn bench_request_get_read_only(b: &mut Bencher) {
             let msg = create_request("GET", "/", None, None);
             let data = msg.as_bytes();
             let len = data.len();
@@ -1084,21 +1139,28 @@ mod bench {
         }
 
         #[bench]
-        fn bench_request_no_body(b: &mut Bencher) {
-            let msg = create_request("GET", "/", None, None);
+        fn bench_request_get(b: &mut Bencher) {
+            let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
             let mut cb = BenchCallbacks { skip_body: true };
             b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut cb) );
         }
 
-        fn create_request(method: &'static str, url: &'static str, header: Option<String>, body: Option<String>) -> String {
+        fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
+            let mut h = HashMap::new();
+            h.insert("Host".to_string(), "faultier.jp".to_string());
+            h.insert("User-Agent".to_string(), "test".to_string());
+            h.insert("Accept".to_string(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+            h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
+            h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
+            if header.is_some() {
+                h.extend(header.unwrap().move_iter());
+            }
             let mut vec = Vec::new();
             let nl = "\r\n".to_string();
             vec.push(format!("{} {} HTTP/1.1", method, url));
-            vec.push("Host: faultier.jp".to_string());
-            vec.push("User-Agent: test".to_string());
-            if header.is_some() {
-                vec.push(header.unwrap());
+            for (name, value) in h.iter() {
+                vec.push(format!("{}: {}", *name, *value));
             }
             vec.push(nl.clone());
             if body.is_some() {
