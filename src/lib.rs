@@ -7,7 +7,7 @@ It's inspired by [http-parser](https://github.com/joyent/http-parser) written in
 #![crate_name="bee"]
 #![crate_type="rlib"]
 #![warn(missing_doc)]
-#![feature(globs)]
+#![feature(globs, macro_rules)]
 #![experimental]
 
 #[cfg(test)] extern crate test;

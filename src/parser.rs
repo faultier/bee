@@ -2,6 +2,7 @@
 
 #![experimental]
 
+use std::char::to_lowercase;
 use std::fmt::{Formatter, FormatError, Show};
 use std::io::{IoError, IoResult};
 use UINT_MAX = std::uint::MAX;
@@ -218,12 +219,21 @@ pub type ParseResult = Result<uint, ParseError>;
 static CR: char = '\r';
 static LF: char = '\n';
 
+macro_rules! reset_state (
+    ($t:expr) => (match $t {
+        Request  => StartReq,
+        Response => StartRes,
+        Both     => StartReqOrRes,
+    })
+)
+
 #[allow(dead_code)]
 /// HTTP parser.
 pub struct Parser {
     // parser internal state
     parser_type: Type,
     state: ParserState,
+    hstate: HeaderParseState,
     pos: uint,
     index: uint,
     sep: uint,
@@ -237,9 +247,11 @@ pub struct Parser {
 
     // common header
     content_length: uint,
+    upgrade: bool,
 
     // request
     method: Option<HttpMethod>,
+    keep_alive: bool,
 
     // response
     status_code: Option<uint>,
@@ -251,11 +263,8 @@ impl Parser {
         Parser {
             parser_type: t,
             http_version: None,
-            state: match t {
-                Request  => StartReq,
-                Response => StartRes,
-                Both     => StartReqOrRes,
-            },
+            state: reset_state!(t),
+            hstate: HeaderGeneral,
             method: None,
             status_code: None,
             content_length: UINT_MAX,
@@ -266,6 +275,8 @@ impl Parser {
             skip: 0,
             major: 0,
             minor: 0,
+            keep_alive: false,
+            upgrade: false,
         }
     }
 
@@ -418,6 +429,7 @@ impl Parser {
                             None => { self.state = Crashed; return Err(InvalidVersion) },
                             v => {
                                 self.http_version = v;
+                                self.keep_alive = v == Some(HTTP_1_1);
                                 self.state = if data[read] as char == CR {
                                     ReqLineAlmostDone
                                 } else {
@@ -448,6 +460,12 @@ impl Parser {
                         }
                         c if is_token(c) => {
                             self.state = HeaderField;
+                            self.hstate = match to_lowercase(c) {
+                                'c' => HeaderConnection,
+                                't' => HeaderTransferEncoding,
+                                'u' => HeaderUpgrade,
+                                _   => HeaderGeneral,
+                            };
                             self.index = 1;
                         }
                         _ => { self.state = Crashed; return Err(InvalidHeaderField) },
@@ -472,6 +490,37 @@ impl Parser {
                             self.index = 0;
                         }
                         c if is_token(c) => {
+                            if self.hstate != HeaderGeneral {
+                                self.hstate = match self.hstate {
+                                    HeaderConnection => match to_lowercase(c) {
+                                        'o' if self.index == 1 => HeaderConnection,
+                                        'n' if self.index == 2 => HeaderConnection,
+                                        'n' if self.index == 3 => HeaderConnection,
+                                        'e' if self.index == 4 => HeaderConnection,
+                                        'c' if self.index == 5 => HeaderConnection,
+                                        't' if self.index == 6 => HeaderConnection,
+                                        'i' if self.index == 7 => HeaderConnection,
+                                        'o' if self.index == 8 => HeaderConnection,
+                                        'n' if self.index == 9 => HeaderConnection,
+                                        't' if self.index == 3 => HeaderContentLength,
+                                        _ => HeaderGeneral,
+                                    },
+                                    HeaderContentLength => match to_lowercase(c) {
+                                        'e' if self.index == 4  => HeaderContentLength,
+                                        'n' if self.index == 5  => HeaderContentLength,
+                                        't' if self.index == 6  => HeaderContentLength,
+                                        '-' if self.index == 7  => HeaderContentLength,
+                                        'l' if self.index == 8  => HeaderContentLength,
+                                        'e' if self.index == 9  => HeaderContentLength,
+                                        'n' if self.index == 10 => HeaderContentLength,
+                                        'g' if self.index == 11 => HeaderContentLength,
+                                        't' if self.index == 12 => HeaderContentLength,
+                                        'h' if self.index == 13 => HeaderContentLength,
+                                        _ => HeaderGeneral,
+                                    },
+                                    _ => HeaderGeneral,
+                                };
+                            }
                             self.index += 1;
                         }
                         _ => { self.state = Crashed; return Err(InvalidHeaderField) },
@@ -487,6 +536,13 @@ impl Parser {
                         CR => self.state = HeaderValueDiscardWSAlmostDone,
                         LF => self.state = HeaderValueDiscardLWS,
                         _ => {
+                            let c = to_lowercase(data[read] as char);
+                            self.hstate = match self.hstate {
+                                HeaderConnection if c == 'k' => HeaderMatchingKeepAlive,
+                                HeaderConnection if c == 'c' => HeaderMatchingClose,
+                                HeaderConnection if c == 'u' => HeaderMatchingUpgrade,
+                                _ => HeaderGeneral,
+                            };
                             self.state = HeaderValue;
                             self.index += 1;
                         },
@@ -538,6 +594,13 @@ impl Parser {
                             } else {
                                 HeaderFieldStart
                             };
+                            let index = self.pos - self.skip - 1;
+                            match self.hstate {
+                                HeaderMatchingKeepAlive if index == 10 => self.keep_alive = true,
+                                HeaderMatchingClose     if index == 5  => self.keep_alive = false,
+                                HeaderMatchingUpgrade   if index == 6  => self.upgrade = true,
+                                _ => (),
+                            }
                             match handler.on_header_field(self, self.pos-(self.index+1), self.sep, self.skip+1, self.pos) {
                                 Err(e) => { self.state = Crashed; return Err(HeaderFieldCallbackFail(e)) },
                                 _ => {
@@ -547,7 +610,44 @@ impl Parser {
                                 },
                             }
                         }
-                        _ => self.index += 1,
+                        _ => {
+                            if self.hstate != HeaderGeneral && is_token(data[read] as char) {
+                                let c = to_lowercase(data[read] as char);
+                                let index = self.pos - self.skip - 1;
+                                self.hstate = match self.hstate {
+                                    HeaderMatchingKeepAlive => match c {
+                                        'e' if index == 1 => HeaderMatchingKeepAlive,
+                                        'e' if index == 2 => HeaderMatchingKeepAlive,
+                                        'p' if index == 3 => HeaderMatchingKeepAlive,
+                                        '-' if index == 4 => HeaderMatchingKeepAlive,
+                                        'a' if index == 5 => HeaderMatchingKeepAlive,
+                                        'l' if index == 6 => HeaderMatchingKeepAlive,
+                                        'i' if index == 7 => HeaderMatchingKeepAlive,
+                                        'v' if index == 8 => HeaderMatchingKeepAlive,
+                                        'e' if index == 9 => HeaderMatchingKeepAlive,
+                                        _ => HeaderGeneral,
+                                    },
+                                    HeaderMatchingClose => match c {
+                                        'l' if index == 1 => HeaderMatchingClose,
+                                        'o' if index == 2 => HeaderMatchingClose,
+                                        's' if index == 3 => HeaderMatchingClose,
+                                        'e' if index == 4 => HeaderMatchingClose,
+                                        _ => HeaderGeneral,
+                                    },
+                                    HeaderMatchingUpgrade => match c {
+                                        'p' if index == 1 => HeaderMatchingUpgrade,
+                                        'g' if index == 2 => HeaderMatchingUpgrade,
+                                        'r' if index == 3 => HeaderMatchingUpgrade,
+                                        'a' if index == 4 => HeaderMatchingUpgrade,
+                                        'd' if index == 5 => HeaderMatchingUpgrade,
+                                        'e' if index == 6 => HeaderMatchingUpgrade,
+                                        _ => HeaderGeneral,
+                                    },
+                                    _ => HeaderGeneral,
+                                };
+                            }
+                            self.index += 1;
+                        }
                     }
                     read += 1;
                     self.pos += 1;
@@ -563,11 +663,7 @@ impl Parser {
                     self.pos += 1;
                     read += 1;
                     if handler.on_headers_complete(self) || self.skip_body {
-                        self.state = match self.parser_type {
-                            Request  => StartReq,
-                            Response => StartRes,
-                            Both     => StartReqOrRes,
-                        };
+                        self.state = reset_state!(self.parser_type);
                         handler.on_message_complete(self);
                         break;
                     }
@@ -576,33 +672,21 @@ impl Parser {
                 HeadersDone => {
                     read += 1;
                     if self.skip_body {
-                        self.state = match self.parser_type {
-                            Request  => StartReq,
-                            Response => StartRes,
-                            Both     => StartReqOrRes,
-                        };
+                        self.state = reset_state!(self.parser_type);
                         handler.on_message_complete(self);
                         self.pos = 0;
                         break;
                     }
                     match self.content_length {
                         0u => {
-                            self.state = match self.parser_type {
-                                Request  => StartReq,
-                                Response => StartRes,
-                                Both     => StartReqOrRes,
-                            };
+                            self.state = reset_state!(self.parser_type);
                             handler.on_message_complete(self);
                             self.pos = 0;
                             break;
                         }
                         UINT_MAX => {
                             if self.parser_type == Request || !self.needs_eof() {
-                                self.state = match self.parser_type {
-                                    Request  => StartReq,
-                                    Response => StartRes,
-                                    Both     => StartReqOrRes,
-                                };
+                                self.state = reset_state!(self.parser_type);
                                 handler.on_message_complete(self);
                                 self.pos = 0;
                                 break;
@@ -680,6 +764,18 @@ enum ParserState {
     Crashed,
 }
 
+#[deriving(PartialEq, Eq, Clone, Show)]
+enum HeaderParseState {
+    HeaderGeneral,
+    HeaderContentLength,
+    HeaderConnection,
+    HeaderMatchingKeepAlive,
+    HeaderMatchingClose,
+    HeaderMatchingUpgrade,
+    HeaderTransferEncoding,
+    HeaderUpgrade,
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -717,7 +813,6 @@ mod test {
             h.insert("Accept".into_maybe_owned(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into_maybe_owned());
             h.insert("Accept-Encoding".into_maybe_owned(), "gzip,deflate".into_maybe_owned());
             h.insert("Accept-Language".into_maybe_owned(), "ja,en-US;q=0.8,en;q=0.6".into_maybe_owned());
-            h.insert("Connection".into_maybe_owned(), "close".into_maybe_owned());
             h.insert("Cache-Control".into_maybe_owned(), "max-age=0".into_maybe_owned());
             h.insert("Cookie".into_maybe_owned(), "key1=value1; key2=value2".into_maybe_owned());
             h.insert("Referer".into_maybe_owned(), "http://faultier.blog.jp/".into_maybe_owned());
@@ -867,11 +962,24 @@ mod test {
             let mut parser = Parser::new(Request);
             let mut handler = TestHandler::new(true, data);
             assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
+            assert!(!parser.keep_alive);
             assert!(handler.started);
             assert_eq!(handler.url, Some("/tag/Rust".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_1_0));
             assert!(handler.finished);
             handler.assert_general_headers();
+        }
+
+        #[test]
+        fn test_request_keep_alive() {
+            let mut header = HashMap::new();
+            header.insert("Connection".to_string(), "keep-alive".to_string());
+            let msg = create_request("GET", "/keep-alive", Some(header), None);
+            let data = msg.as_bytes();
+            let mut parser = Parser::new(Request);
+            let mut handler = TestHandler::new(true, data);
+            assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
+            assert!(parser.keep_alive);
         }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
@@ -881,7 +989,6 @@ mod test {
             h.insert("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string());
             h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
             h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
-            h.insert("Connection".to_string(), "close".to_string());
             h.insert("Cache-Control".to_string(), "max-age=0".to_string());
             h.insert("Cookie".to_string(), "key1=value1; key2=value2".to_string());
             h.insert("Referer".to_string(), "http://faultier.blog.jp/".to_string());
@@ -915,11 +1022,24 @@ mod test {
             let mut parser = Parser::new(Request);
             let mut handler = TestHandler::new(true, data);
             assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
+            assert!(parser.keep_alive);
             assert!(handler.started);
             assert_eq!(handler.url, Some("/tag/Rust".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_1_1));
             assert!(handler.finished);
             handler.assert_general_headers();
+        }
+
+        #[test]
+        fn test_request_close() {
+            let mut header = HashMap::new();
+            header.insert("Connection".to_string(), "close".to_string());
+            let msg = create_request("GET", "/close", Some(header), None);
+            let data = msg.as_bytes();
+            let mut parser = Parser::new(Request);
+            let mut handler = TestHandler::new(true, data);
+            assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
+            assert!(!parser.keep_alive);
         }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
@@ -929,7 +1049,6 @@ mod test {
             h.insert("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string());
             h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
             h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
-            h.insert("Connection".to_string(), "close".to_string());
             h.insert("Cache-Control".to_string(), "max-age=0".to_string());
             h.insert("Cookie".to_string(), "key1=value1; key2=value2".to_string());
             h.insert("Referer".to_string(), "http://faultier.blog.jp/".to_string());
