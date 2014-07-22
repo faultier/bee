@@ -3,7 +3,7 @@
 #![experimental]
 
 use std::fmt::{Formatter, FormatError, Show};
-use std::io::{EndOfFile, IoError, IoResult};
+use std::io::{IoError, IoResult};
 use UINT_MAX = std::uint::MAX;
 
 #[deriving(PartialEq, Eq, Clone, Show)]
@@ -209,20 +209,35 @@ pub enum ParseError {
     InvalidEOFState,
 }
 
-pub type ParseResult = Result<uint, ParseError>;
+pub type ParseResult = Result<(uint, int), ParseError>;
 
 static CR: char = '\r';
 static LF: char = '\n';
 
+#[allow(dead_code)]
 /// HTTP parser.
 pub struct Parser {
+    // parser internal state
     parser_type: Type,
-    http_version: Option<HttpVersion>,
     state: ParserState,
-    method: Option<HttpMethod>,
-    status_code: Option<uint>,
-    content_length: uint,
+    index: uint,
+    sep: uint,
+    skip: uint,
     skip_body: bool,
+
+    // http version
+    http_version: Option<HttpVersion>,
+    major: uint,
+    minor: uint,
+
+    // common header
+    content_length: uint,
+
+    // request
+    method: Option<HttpMethod>,
+
+    // response
+    status_code: Option<uint>,
 }
 
 impl Parser {
@@ -240,33 +255,41 @@ impl Parser {
             status_code: None,
             content_length: UINT_MAX,
             skip_body: false,
+            index: 0,
+            sep: 0,
+            skip: 0,
+            major: 0,
+            minor: 0,
         }
     }
 
-    /// Parse HTTP message.
-    pub fn parse<R: Reader, C: Callbacks>(&mut self, reader: &mut R, callbacks: &mut C) -> ParseResult {
-        if self.state == Dead { return Ok(0) }
+   /// Parse HTTP message.
+    pub fn parse<C: Callbacks>(&mut self, data: &[u8], callbacks: &mut C) -> ParseResult {
+        if self.state == Dead { return Ok((0, 0)) }
         if self.state == Crashed { return Err(OtherParseError) }
+        if data.len() == 0 { return Ok((0, 0)) }
 
         let mut read = 0u;
         let mut pos  = 0u;
-        let mut rbuf = [0u8, ..6];
-        let mut buf1: Vec<u8> = Vec::with_capacity(256);
-        let mut buf2: Vec<u8> = Vec::with_capacity(256);
+        let mut needs = -1i;
+        let len = data.len();
 
-        let mut major = 0u;
-        let mut minor = 0u;
-
-        'read: loop {
+        loop {
+            pos = read;
             match self.state {
                 StartReq => {
-                    read += match reader.read(rbuf.mut_slice(0, 3)) {
-                        Ok(len) if len == 3 => len,
-                        Err(IoError { kind: EndOfFile, ..}) => return Ok(0), // no message
-                        _ => return Err(InvalidMethod),
-                    };
-                    self.method = Some(match (rbuf[0] as char, rbuf[1] as char, rbuf[2] as char) {
-                        ('C', 'H', 'E') => HttpCheckout, 
+                    if len - pos < 3 {
+                        needs = 3 - (len - pos) as int;
+                        break;
+                    }
+                    self.major = 0;
+                    self.minor = 0;
+                    self.http_version = None;
+                    self.content_length = UINT_MAX;
+                    self.skip_body = false;
+                    callbacks.on_message_begin(self);
+                    let maybe = match (data[pos] as char, data[pos+1] as char, data[pos+2] as char) {
+                        ('C', 'H', 'E') => HttpCheckout,
                         ('C', 'O', 'N') => HttpConnect,
                         ('C', 'O', 'P') => HttpCopy,
                         ('D', 'E', 'L') => HttpDelete,
@@ -282,7 +305,7 @@ impl Parser {
                         ('O', 'P', 'T') => HttpOptions,
                         ('P', 'A', 'T') => HttpPatch,
                         ('P', 'O', 'S') => HttpPost,
-                        ('P', 'R', 'O') => HttpPropFind,    // or PROPPATCH
+                        ('P', 'R', 'O') => HttpPropPatch,    // or PROPFIND
                         ('P', 'U', 'R') => HttpPurge,
                         ('P', 'U', 'T') => HttpPut,
                         ('R', 'E', 'P') => HttpReport,
@@ -291,158 +314,140 @@ impl Parser {
                         ('T', 'R', 'A') => HttpTrace,
                         ('U', 'N', 'L') => HttpUnlink,      // or UNLOCK
                         ('U', 'N', 'S') => HttpUnsubscribe,
-                        _   => {
-                            self.state = Crashed;
-                            return Err(InvalidMethod);
-                        }
-                    });
-                    pos += 3;
+                        _               => { self.state = Crashed; return Err(InvalidMethod) },
+                    };
+                    if len - pos < maybe.len() + 1 {
+                        needs = (maybe.len() + 1) as int - (len - pos) as int;
+                        break;
+                    }
+                    read += 3;
+                    self.method = Some(maybe);
                     self.state = ReqMethod;
-                    callbacks.on_message_begin(self);
+                    self.index = 3;
                 }
                 ReqMethod => {
+                    if pos == len { break }
+                    read += 1;
                     let method = self.method.unwrap();
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidMethod),
-                    };
-                    if rbuf[0] as char == ' ' && pos == method.len() {
+                    if data[pos] as char == ' ' && pos == method.len() {
                         self.state = ReqUrl;
-                        pos = 0;
-                        continue;
+                        self.index = 0;
+                    } else {
+                        if !method.hit(self.index, data[pos] as char) {
+                            self.method = Some(match method {
+                                HttpMkCalendar if self.index == 3 && data[pos] as char == 'O' => HttpMkCol,
+                                HttpPropPatch  if self.index == 4 && data[pos] as char == 'F' => HttpPropFind,
+                                HttpUnlink     if self.index == 3 && data[pos] as char == 'O' => HttpUnlock,
+                                _ => { self.state = Crashed; return Err(InvalidMethod) },
+                            });
+                        }
+                        self.index += 1;
                     }
-                    if !method.hit(pos, rbuf[0] as char) {
-                        self.method = Some(match method {
-                            HttpMkCalendar if pos == 3 && rbuf[0] as char == 'O' => HttpMkCol,
-                            HttpPropFind if pos == 4 && rbuf[0] as char == 'P'  => HttpPropPatch,
-                            HttpUnlink if pos == 3 && rbuf[0] as char == 'O' => HttpUnlock,
-                            _ => {
-                                self.state = Crashed;
-                                return Err(InvalidMethod);
-                            }
-                        });
-                    }
-                    pos += 1;
                 }
                 ReqUrl => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidUrl),
-                    };
-                    match rbuf[0] as char {
+                    if pos == len {
+                        read -= self.index;
+                        self.index = 0;
+                        break
+                    }
+                    read += 1;
+                    match data[pos] as char {
                         ' ' => {
-                            if pos == 0 { return Err(InvalidUrl); }
-                            match callbacks.on_url(self, buf1.as_slice()) {
+                            if self.index == 0 { self.state = Crashed; return Err(InvalidUrl) }
+                            let url = data.slice(pos-self.index, pos);
+                            match callbacks.on_url(self, url) {
                                 Ok(()) => {
                                     self.state = ReqHttpStart;
-                                    pos = 0;
-                                    buf1.clear();
+                                    self.index = 0;
                                 }
-                                Err(e) => {
-                                    self.state = Crashed;
-                                    return Err(UrlCallbackFail(e));
-                                }
+                                Err(e) => { self.state = Crashed; return Err(UrlCallbackFail(e)) },
                             }
                         }
                         CR | LF => {
-                            if pos == 0 { return Err(InvalidUrl); }
+                            if self.index == 0 { self.state = Crashed; return Err(InvalidUrl) }
                             self.http_version = Some(HTTP_0_9);
-                            match callbacks.on_url(self, buf1.as_slice()) {
+                            // TODO: merge buffer
+                            let url = data.slice(pos-self.index, pos);
+                            match callbacks.on_url(self, url) {
                                 Ok(()) => {
                                     self.state = Dead;
+                                    self.index = 0;
+                                    needs = 0;
                                     callbacks.on_message_complete(self);
-                                    break 'read;
+                                    break;
                                 }
-                                Err(e) => {
-                                    self.state = Crashed;
-                                    return Err(UrlCallbackFail(e));
-                                }
+                                Err(e) => { self.state = Crashed; return Err(UrlCallbackFail(e)) },
                             }
                         }
                         _ => {
-                            buf1.push(rbuf[0]);
-                            pos += 1;
-                        }
+                            self.index += 1;
+                        },
                     }
                 }
                 ReqHttpStart => {
-                    read += match reader.read(rbuf.mut_slice(0, 6)) {
-                        Ok(len) if len == 6 => len,
-                        _ => return Err(InvalidVersion),
-                    };
-                    if rbuf[0] as char != 'H'
-                        || rbuf[1] as char != 'T'
-                            || rbuf[2] as char != 'T'
-                            || rbuf[3] as char != 'P'
-                            || rbuf[4] as char != '/'
-                            || rbuf[5] < '0' as u8
-                            || rbuf[5] > '9' as u8 {
+                    read += 6;
+                    if data[pos] as char != 'H'
+                        || data[pos+1] as char != 'T'
+                            || data[pos+2] as char != 'T'
+                            || data[pos+3] as char != 'P'
+                            || data[pos+4] as char != '/'
+                            || data[pos+5] < '0' as u8
+                            || data[pos+5] > '9' as u8 {
+                                self.state = Crashed;
                                 return Err(InvalidVersion);
                             }
                     self.state = ReqHttpMajor;
-                    pos += 1;
-                    major = rbuf[5] as uint - '0' as uint;
+                    self.major = data[pos+5] as uint - '0' as uint;
+                    self.index += 1;
                 }
                 ReqHttpMajor => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidVersion),
-                    };
-                    match rbuf[0] as char {
-                        '.' if pos > 0 => {
+                    read += 1;
+                    match data[pos] as char {
+                        '.' if self.index > 0 => {
                             self.state = ReqHttpMinor;
-                            pos = 0;
+                            self.index = 0;
                         }
                         n if n >= '0' && n <= '9' => {
-                            pos += 1;
-                            major *= 10;
-                            major += n as uint - '0' as uint;
+                            self.index += 1;
+                            self.major *= 10;
+                            self.major += n as uint - '0' as uint;
                         }
-                        _ => return Err(InvalidVersion),
+                        _ => { self.state = Crashed; return Err(InvalidVersion) },
                     }
                 }
                 ReqHttpMinor => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidVersion),
-                    };
-                    match rbuf[0] as char {
+                    read += 1;
+                    match data[pos] as char {
                         n if n >= '0' && n <= '9' => {
-                            pos += 1;
-                            minor *= 10;
-                            minor += n as uint - '0' as uint;
+                            self.index += 1;
+                            self.minor *= 10;
+                            self.minor += n as uint - '0' as uint;
                         }
-                        CR | LF if pos > 0 => match HttpVersion::find(major, minor) {
-                            None => return Err(InvalidVersion),
+                        CR | LF if self.index > 0 => match HttpVersion::find(self.major, self.minor) {
+                            None => { self.state = Crashed; return Err(InvalidVersion) },
                             v => {
                                 self.http_version = v;
-                                self.state = if rbuf[0] as char == CR {
+                                self.state = if data[pos] as char == CR {
                                     ReqLineAlmostDone
                                 } else {
                                     HeaderFieldStart
                                 };
-                                pos = 0;
+                                self.index = 0;
                             }
                         },
-                        _ => return Err(InvalidVersion),
+                        _ => { self.state = Crashed; return Err(InvalidVersion) },
                     }
                 }
                 ReqLineAlmostDone => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidRequestLine),
-                    };
-                    if rbuf[0] as char != LF {
+                    read += 1;
+                    if data[pos] as char != LF {
                         return Err(InvalidRequestLine);
                     }
                     self.state = HeaderFieldStart;
                 }
                 HeaderFieldStart => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidHeaderField),
-                    };
-                    match rbuf[0] as char {
+                    read += 1;
+                    match data[pos] as char {
                         CR => self.state = HeadersAlmostDone,
                         LF => {
                             self.state = HeadersDone;
@@ -450,165 +455,133 @@ impl Parser {
                         }
                         c if is_header_token(c) => {
                             self.state = HeaderField;
-                            pos = 1;
-                            buf1.push(rbuf[0]);
+                            self.index = 1;
                         }
-                        _ => return Err(InvalidHeaderField)
+                        _ => { self.state = Crashed; return Err(InvalidHeaderField) },
                     }
                 }
                 HeaderField => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidHeaderField),
-                    };
-                    match rbuf[0] as char {
+                    read += 1;
+                    match data[pos] as char {
                         ':' => {
                             self.state = HeaderValueDiscardWS;
-                            pos = 0;
+                            self.sep = pos;
+                            self.skip = pos;
+                            self.index += 1;
                         }
                         CR => {
                             self.state = HeaderAlmostDone;
-                            pos = 0;
+                            self.index = 0;
                         }
                         LF => {
                             self.state = HeaderFieldStart;
-                            pos = 0;
+                            self.index = 0;
                         }
                         c if is_header_token(c) => {
-                            buf1.push(rbuf[0]);
-                            pos += 1;
+                            self.index += 1;
                         }
-                        _ => return Err(InvalidHeaderField),
+                        _ => { self.state = Crashed; return Err(InvalidHeaderField) },
                     }
                 }
                 HeaderValueDiscardWS => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidHeaderField),
-                    };
-                    match rbuf[0] as char {
-                        ' ' | '\t' => continue,
-                        CR => {
-                            self.state = HeaderValueDiscardWSAlmostDone;
-                            continue
+                    read += 1;
+                    match data[pos] as char {
+                        ' ' | '\t' => {
+                            self.skip += 1;
                         },
-                        LF => {
-                            self.state = HeaderValueDiscardLWS;
-                            continue
+                        CR => self.state = HeaderValueDiscardWSAlmostDone,
+                        LF => self.state = HeaderValueDiscardLWS,
+                        _ => {
+                            self.state = HeaderValue;
+                            self.index += 1;
                         },
-                        _ => (),
                     }
-                    self.state = HeaderValue;
-                    buf2.push(rbuf[0]);
-                    pos = 1;
                 }
                 HeaderValueDiscardWSAlmostDone => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidHeaderField),
-                    };
-                    if rbuf[0] as char != LF {
-                        return Err(InvalidHeaderField);
-                    }
+                    read += 1;
+                    if data[pos] as char != LF { self.state = Crashed; return Err(InvalidHeaderField) }
                     self.state = HeaderValueDiscardLWS;
                 }
                 HeaderValueDiscardLWS => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidHeaderField),
-                    };
-                    if rbuf[0] as char == ' ' || rbuf[0] as char == '\t' {
+                    read += 1;
+                    if data[pos] as char == ' ' || data[pos] as char == '\t' {
                         self.state = HeaderValueDiscardWS;
-                        continue;
-                    }
-                    let val = [];
-                    match callbacks.on_header_field(self, buf1.as_slice(), val) {
-                        Err(e) => return Err(HeaderFieldCallbackFail(e)),
-                        _ => {
-                            buf1.clear();
-                            pos = 0;
-                        },
-                    }
-                    match rbuf[0] as char {
-                        CR => self.state = HeadersAlmostDone,
-                        LF => {
-                            self.state = HeadersDone;
-                            self.skip_body = callbacks.on_headers_complete(self);
+                        self.skip += 1;
+                    } else {
+                        // header value is empty.
+                        let name = data.slice(pos-self.index, self.sep);
+                        match callbacks.on_header_field(self, name, []) {
+                            Err(e) => { self.state = Crashed; return Err(HeaderFieldCallbackFail(e)) },
+                            _ => {
+                                self.index = 0;
+                            },
                         }
-                        c if is_header_token(c) => {
-                            self.state = HeaderFieldStart;
-                            buf1.push(rbuf[0]);
-                            pos = 1;
+                        match data[pos] as char {
+                            CR => self.state = HeadersAlmostDone,
+                            LF => {
+                                self.state = HeadersDone;
+                                self.skip_body = callbacks.on_headers_complete(self);
+                            }
+                            c if is_header_token(c) => {
+                                self.state = HeaderFieldStart;
+                                self.index = 1;
+                            }
+                            _ => { self.state = Crashed; return Err(InvalidHeaderField) },
                         }
-                        _ => return Err(InvalidHeaderField),
                     }
                 }
                 HeaderValue => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidHeaderField),
-                    };
-                    match rbuf[0] as char {
+                    read += 1;
+                    match data[pos] as char {
                         CR | LF => {
-                            self.state = if rbuf[0] as char == CR {
+                            self.state = if data[pos] as char == CR {
                                 HeaderAlmostDone
                             } else {
                                 HeaderFieldStart
                             };
-                            match callbacks.on_header_field(self, buf1.as_slice(), buf2.as_slice()) {
-                                Err(e) => return Err(HeaderFieldCallbackFail(e)),
-                                _ => {
-                                    buf1.clear();
-                                    buf2.clear();
-                                    pos = 0;
-                                },
+                            let name = data.slice(pos-(self.index+1), self.sep);
+                            let value = data.slice(self.skip+1, pos);
+                            match callbacks.on_header_field(self, name, value) {
+                                Err(e) => { self.state = Crashed; return Err(HeaderFieldCallbackFail(e)) },
+                                _ => self.index = 0,
                             }
                         }
                         _ => {
-                            buf2.push(rbuf[0]);
-                            pos += 1;
+                            self.index += 1;
                         },
                     }
                 }
                 HeaderAlmostDone => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidHeaderField),
-                    };
-                    if rbuf[0] as char != LF {
-                        return Err(InvalidHeaderField);
-                    }
+                    read += 1;
+                    if data[pos] as char != LF { self.state = Crashed; return Err(InvalidHeaderField) }
                     self.state = HeaderFieldStart;
                 }
                 HeadersAlmostDone => {
-                    read += match reader.read(rbuf.mut_slice(0, 1)) {
-                        Ok(len) if len == 1 => len,
-                        _ => return Err(InvalidHeaders),
-                    };
-                    if rbuf[0] as char != LF {
-                        return Err(InvalidHeaders);
-                    }
-                    self.state = if callbacks.on_headers_complete(self) || self.skip_body {
+                    read += 1;
+                    if data[pos] as char != LF { self.state = Crashed; return Err(InvalidHeaders) }
+                    if callbacks.on_headers_complete(self) || self.skip_body {
                         self.state = match self.parser_type {
                             Request  => StartReq,
                             Response => StartRes,
                             Both     => StartReqOrRes,
                         };
+                        needs = 0;
                         callbacks.on_message_complete(self);
-                        break 'read;
-                    } else {
-                        HeadersDone
-                    };
+                        break;
+                    }
+                    self.state = HeadersDone;
                 }
                 HeadersDone => {
+                    read += 1;
                     if self.skip_body {
                         self.state = match self.parser_type {
                             Request  => StartReq,
                             Response => StartRes,
                             Both     => StartReqOrRes,
                         };
+                        needs = 0;
                         callbacks.on_message_complete(self);
-                        break 'read;
+                        break;
                     }
                     match self.content_length {
                         0u => {
@@ -617,8 +590,9 @@ impl Parser {
                                 Response => StartRes,
                                 Both     => StartReqOrRes,
                             };
+                            needs = 0;
                             callbacks.on_message_complete(self);
-                            break 'read;
+                            break;
                         }
                         UINT_MAX => {
                             if self.parser_type == Request || !self.needs_eof() {
@@ -627,9 +601,9 @@ impl Parser {
                                     Response => StartRes,
                                     Both     => StartReqOrRes,
                                 };
+                                needs = 0;
                                 callbacks.on_message_complete(self);
-                                break 'read;
-
+                                break;
                             }
                             self.state = BodyIdentityEOF;
                         }
@@ -637,12 +611,11 @@ impl Parser {
                     }
                 }
                 Dead | Crashed => unreachable!(),
-                ReqUrlStart | ReqHttp => unreachable!(), // deprecated
                 _ => unimplemented!()
             }
         }
 
-        return Ok(read);
+        return Ok((read, needs));
     }
 
     fn needs_eof(&mut self) -> bool {
@@ -683,10 +656,8 @@ enum ParserState {
     StartRes,
     StartReqOrRes,
     ReqMethod,
-    ReqUrlStart,
     ReqUrl,
     ReqHttpStart,
-    ReqHttp,
     ReqHttpMajor,
     ReqHttpMinor,
     ReqLineAlmostDone,
@@ -712,7 +683,7 @@ enum ParserState {
 mod test {
     use super::*;
     use std::collections::HashMap;
-    use std::io::{BufReader, InvalidInput, IoResult, standard_error};
+    use std::io::{InvalidInput, IoResult, standard_error};
     use std::str::{SendStr, from_utf8};
 
     pub struct TestCallbacks {
@@ -785,62 +756,103 @@ mod test {
 
     #[test]
     fn test_no_message() {
-        let buf: &[u8] = [];
-        let mut reader = BufReader::new(buf);
         let mut parser = Parser::new(Request);
         let mut callbacks = TestCallbacks::new(true);
-        assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(0));
+        assert_eq!(parser.parse([], &mut callbacks), Ok((0, 0)));
         assert!(!callbacks.started);
         assert!(!callbacks.finished);
+    }
+
+    #[test]
+    fn test_partial_data() {
+        let data = "HEAD /hello.txt HTTP/1.0\r\n\r\n".as_bytes();
+        let mut parser = Parser::new(Request);
+        let mut cb = TestCallbacks::new(true);
+
+        // parse "HE", len < 3
+        let part = data.slice(0, 2);
+        let (read, needs) = parser.parse(part, &mut cb).unwrap();
+        assert_eq!(read, 0);
+        assert_eq!(needs, 1);
+        assert_eq!(parser.state, super::StartReq);
+        assert!(!cb.started);
+        assert!(!cb.finished);
+
+        // parse "HEA", len < HttpHead.len()
+        let len = ((part.len() as int - read as int) + needs) as uint;
+        let part = data.slice(read, len);
+        let (read, needs) = parser.parse(part, &mut cb).unwrap();
+        assert_eq!(read, 0);
+        assert_eq!(needs, 2);
+        assert_eq!(parser.state, super::StartReq);
+        assert!(cb.started);
+        assert!(!cb.finished);
+
+        // parse "HEAD "
+        let len = ((part.len() as int - read as int) + needs) as uint;
+        let part = data.slice(read, len);
+        let (read, needs) = parser.parse(part, &mut cb).unwrap();
+        assert_eq!(read, 5);
+        assert_eq!(needs, -1);
+        assert_eq!(parser.state, super::ReqUrl);
+        assert!(cb.started);
+        assert!(!cb.finished);
+
+        // parse "/he"
+        let part = data.slice(5, 8);
+        let (read, needs) = parser.parse(part, &mut cb).unwrap();
+        assert_eq!(read, 0);
+        assert_eq!(needs, -1);
+        assert_eq!(parser.state, super::ReqUrl);
+        assert!(!cb.finished);
+
+        // parse "/hello.txt HTTP/1.0"
+        let part = data.slice_from(5);
+        let (read, needs) = parser.parse(part, &mut cb).unwrap();
+        assert_eq!(read, part.len());
+        assert_eq!(needs, 0);
+        assert!(cb.finished);
     }
 
     mod http_0_9 {
         use super::TestCallbacks;
         use super::super::*;
-        use std::io::BufReader;
 
         #[test]
         fn test_simple_request_get() {
             let msg = "GET /\r\n";
             let data = msg.as_bytes();
-            let mut reader = BufReader::new(data);
             let mut parser = Parser::new(Request);
             let mut callbacks = TestCallbacks::new(true);
-            assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(6));
+
+            assert_eq!(parser.parse(data, &mut callbacks), Ok((6, 0)));
             assert!(callbacks.started);
             assert_eq!(callbacks.url, Some("/".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_0_9));
             assert!(callbacks.finished);
-            assert_eq!(reader.tell(), Ok(6));
 
             // Parser is dead, no more read.
-            let mut reader = BufReader::new(msg.as_bytes());
-            let mut callbacks = TestCallbacks::new(true);
-            assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(0));
-            assert_eq!(reader.tell(), Ok(0));
+            assert_eq!(parser.parse(data, &mut callbacks), Ok((0, 0)));
         }
     }
 
     mod http_1_0 {
         use super::TestCallbacks;
         use super::super::*;
-        use std::io::BufReader;
         use std::collections::HashMap;
 
         #[test]
         fn test_request_without_header() {
             let msg = "GET / HTTP/1.0\r\n\r\n";
             let data = msg.as_bytes();
-            let mut reader = BufReader::new(data);
             let mut parser = Parser::new(Request);
             let mut callbacks = TestCallbacks::new(true);
-            assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(data.len()));
+            assert_eq!(parser.parse(data, &mut callbacks), Ok((data.len(), 0)));
             assert!(callbacks.started);
             assert_eq!(callbacks.url, Some("/".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_1_0));
             assert!(callbacks.headers_finished);
             assert!(callbacks.finished);
-            assert_eq!(reader.tell(), Ok(data.len() as u64));
         }
 
         #[test]
@@ -849,41 +861,25 @@ mod test {
             let mut callbacks = TestCallbacks::new(true);
             let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
-            let mut reader = BufReader::new(data);
-            assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(data.len()));
+            assert_eq!(parser.parse(data, &mut callbacks), Ok((data.len(), 0)));
             assert!(callbacks.started);
             assert_eq!(callbacks.url, Some("/tag/Rust".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_1_0));
             assert_general_headers(&callbacks);
             assert!(callbacks.finished);
-            assert_eq!(reader.tell(), Ok(data.len() as u64));
         }
-
-//      #[test]
-//      fn test_request_body() {
-//          let mut parser = Parser::new(Request);
-//          let mut callbacks = TestCallbacks::new(false);
-//          let msg = create_request("POST", "/", None, Some("Hello, world".to_string()));
-//          let data = msg.as_bytes();
-//          let mut reader = BufReader::new(data);
-//          {
-//              assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(data.len()));
-//          }
-//          assert!(callbacks.started);
-//          assert_eq!(callbacks.url, Some("/".to_string()));
-//          assert_eq!(parser.http_version, Some(HTTP_1_0));
-//          assert_general_headers(&callbacks);
-//          assert!(callbacks.finished);
-//          assert_eq!(reader.tell(), Ok(data.len() as u64));
-//      }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
             let mut h = HashMap::new();
             h.insert("Host".to_string(), "faultier.jp".to_string());
-            h.insert("User-Agent".to_string(), "test".to_string());
-            h.insert("Accept".to_string(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+            h.insert("User-Agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:30.0) Gecko/20100101 Firefox/30.0".to_string());
+            h.insert("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string());
             h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
             h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
+            h.insert("Connection".to_string(), "close".to_string());
+            h.insert("Cache-Control".to_string(), "max-age=0".to_string());
+            h.insert("Cookie".to_string(), "key1=value1; key2=value2".to_string());
+            h.insert("Referer".to_string(), "http://faultier.blog.jp/".to_string());
             if header.is_some() {
                 h.extend(header.unwrap().move_iter());
             }
@@ -904,10 +900,14 @@ mod test {
         fn assert_general_headers(cb: &TestCallbacks) {
             let mut h = HashMap::new();
             h.insert("Host".into_maybe_owned(), "faultier.jp".into_maybe_owned());
-            h.insert("User-Agent".into_maybe_owned(), "test".into_maybe_owned());
-            h.insert("Accept".into_maybe_owned(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".into_maybe_owned());
+            h.insert("User-Agent".into_maybe_owned(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:30.0) Gecko/20100101 Firefox/30.0".into_maybe_owned());
+            h.insert("Accept".into_maybe_owned(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into_maybe_owned());
             h.insert("Accept-Encoding".into_maybe_owned(), "gzip,deflate".into_maybe_owned());
             h.insert("Accept-Language".into_maybe_owned(), "ja,en-US;q=0.8,en;q=0.6".into_maybe_owned());
+            h.insert("Connection".into_maybe_owned(), "close".into_maybe_owned());
+            h.insert("Cache-Control".into_maybe_owned(), "max-age=0".into_maybe_owned());
+            h.insert("Cookie".into_maybe_owned(), "key1=value1; key2=value2".into_maybe_owned());
+            h.insert("Referer".into_maybe_owned(), "http://faultier.blog.jp/".into_maybe_owned());
  
             assert!(cb.headers_finished);
             for (name, value) in h.iter() {
@@ -919,7 +919,6 @@ mod test {
     mod http_1_1 {
         use super::TestCallbacks;
         use super::super::*;
-        use std::io::BufReader;
         use std::collections::HashMap;
 
         #[test]
@@ -928,23 +927,25 @@ mod test {
             let mut callbacks = TestCallbacks::new(true);
             let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
-            let mut reader = BufReader::new(data);
-            assert_eq!(parser.parse(&mut reader, &mut callbacks), Ok(data.len()));
+            assert_eq!(parser.parse(data, &mut callbacks), Ok((data.len(), 0)));
             assert!(callbacks.started);
             assert_eq!(callbacks.url, Some("/tag/Rust".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_1_1));
             assert_general_headers(&callbacks);
             assert!(callbacks.finished);
-            assert_eq!(reader.tell(), Ok(data.len() as u64));
         }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
             let mut h = HashMap::new();
             h.insert("Host".to_string(), "faultier.jp".to_string());
-            h.insert("User-Agent".to_string(), "test".to_string());
-            h.insert("Accept".to_string(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+            h.insert("User-Agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:30.0) Gecko/20100101 Firefox/30.0".to_string());
+            h.insert("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string());
             h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
             h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
+            h.insert("Connection".to_string(), "close".to_string());
+            h.insert("Cache-Control".to_string(), "max-age=0".to_string());
+            h.insert("Cookie".to_string(), "key1=value1; key2=value2".to_string());
+            h.insert("Referer".to_string(), "http://faultier.blog.jp/".to_string());
             if header.is_some() {
                 h.extend(header.unwrap().move_iter());
             }
@@ -965,10 +966,14 @@ mod test {
         fn assert_general_headers(cb: &TestCallbacks) {
             let mut h = HashMap::new();
             h.insert("Host".into_maybe_owned(), "faultier.jp".into_maybe_owned());
-            h.insert("User-Agent".into_maybe_owned(), "test".into_maybe_owned());
-            h.insert("Accept".into_maybe_owned(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".into_maybe_owned());
+            h.insert("User-Agent".into_maybe_owned(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:30.0) Gecko/20100101 Firefox/30.0".into_maybe_owned());
+            h.insert("Accept".into_maybe_owned(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into_maybe_owned());
             h.insert("Accept-Encoding".into_maybe_owned(), "gzip,deflate".into_maybe_owned());
             h.insert("Accept-Language".into_maybe_owned(), "ja,en-US;q=0.8,en;q=0.6".into_maybe_owned());
+            h.insert("Connection".into_maybe_owned(), "close".into_maybe_owned());
+            h.insert("Cache-Control".into_maybe_owned(), "max-age=0".into_maybe_owned());
+            h.insert("Cookie".into_maybe_owned(), "key1=value1; key2=value2".into_maybe_owned());
+            h.insert("Referer".into_maybe_owned(), "http://faultier.blog.jp/".into_maybe_owned());
  
             assert!(cb.headers_finished);
             for (name, value) in h.iter() {
@@ -982,7 +987,6 @@ mod test {
 mod bench {
     use super::*;
     use test::Bencher;
-    use std::io::BufReader;
 
     struct BenchCallbacks {
         skip_body: bool
@@ -996,38 +1000,20 @@ mod bench {
     fn bench_no_message(b: &mut Bencher) {
         let buf: &[u8] = [];
         let mut cb = BenchCallbacks { skip_body: true };
-        b.iter(|| Parser::new(Request).parse(&mut BufReader::new(buf), &mut cb) );
+        b.iter(|| Parser::new(Request).parse(buf, &mut cb) );
     }
 
     mod http_0_9 {
         use super::BenchCallbacks;
         use super::super::*;
         use test::Bencher;
-        use std::io::BufReader;
-
-        #[allow(unused_must_use)]
-        #[bench]
-        fn bench_simple_request_get_read_only(b: &mut Bencher) {
-            let msg = "GET /\r\n";
-            let data = msg.as_bytes();
-            let len = data.len();
-            let mut buf = [0u8];
-            b.iter(|| {
-                let mut pos = 0u;
-                let mut reader = BufReader::new(data);
-                while pos < len {
-                    reader.read(buf);
-                    pos += 1;
-                }
-            });
-        }
 
         #[bench]
         fn bench_simple_request_get(b: &mut Bencher) {
             let msg = "GET /\r\n";
             let data = msg.as_bytes();
             let mut cb = BenchCallbacks { skip_body: true };
-            b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut cb) );
+            b.iter(|| Parser::new(Request).parse(data, &mut cb) );
         }
     }
 
@@ -1035,50 +1021,14 @@ mod bench {
         use super::BenchCallbacks;
         use super::super::*;
         use test::Bencher;
-        use std::io::BufReader;
         use std::collections::HashMap;
-
-        #[allow(unused_must_use)]
-        #[bench]
-        fn bench_request_without_header_read_only(b: &mut Bencher) {
-            let msg = "GET / HTTP/1.0\r\n\r\n";
-            let data = msg.as_bytes();
-            let len = data.len();
-            b.iter(|| {
-                let mut pos = 0u;
-                let mut reader = BufReader::new(data);
-                let mut buf = [0u8];
-                while pos < len {
-                    reader.read(buf);
-                    pos += 1;
-                }
-            });
-        }
-
-
-        #[allow(unused_must_use)]
-        #[bench]
-        fn bench_request_get_read_only(b: &mut Bencher) {
-            let msg = create_request("GET", "/", None, None);
-            let data = msg.as_bytes();
-            let len = data.len();
-            b.iter(|| {
-                let mut pos = 0u;
-                let mut reader = BufReader::new(data);
-                let mut buf = [0u8];
-                while pos < len {
-                    reader.read(buf);
-                    pos += 1;
-                }
-            });
-        }
 
         #[bench]
         fn bench_request_without_header(b: &mut Bencher) {
             let msg = "GET / HTTP/1.0\r\n\r\n";
             let data = msg.as_bytes();
             let mut cb = BenchCallbacks { skip_body: true };
-            b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut cb) );
+            b.iter(|| Parser::new(Request).parse(data, &mut cb) );
         }
 
         #[bench]
@@ -1086,16 +1036,20 @@ mod bench {
             let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
             let mut cb = BenchCallbacks { skip_body: true };
-            b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut cb) );
+            b.iter(|| Parser::new(Request).parse(data, &mut cb) );
         }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
             let mut h = HashMap::new();
             h.insert("Host".to_string(), "faultier.jp".to_string());
-            h.insert("User-Agent".to_string(), "test".to_string());
-            h.insert("Accept".to_string(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+            h.insert("User-Agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:30.0) Gecko/20100101 Firefox/30.0".to_string());
+            h.insert("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string());
             h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
             h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
+            h.insert("Connection".to_string(), "close".to_string());
+            h.insert("Cache-Control".to_string(), "max-age=0".to_string());
+            h.insert("Cookie".to_string(), "key1=value1; key2=value2; key3=value3; key4=value4; key5=value5".to_string());
+            h.insert("Referer".to_string(), "http://faultier.blog.jp/".to_string());
             if header.is_some() {
                 h.extend(header.unwrap().move_iter());
             }
@@ -1118,41 +1072,27 @@ mod bench {
         use super::BenchCallbacks;
         use super::super::*;
         use test::Bencher;
-        use std::io::BufReader;
         use std::collections::HashMap;
-
-        #[allow(unused_must_use)]
-        #[bench]
-        fn bench_request_get_read_only(b: &mut Bencher) {
-            let msg = create_request("GET", "/", None, None);
-            let data = msg.as_bytes();
-            let len = data.len();
-            b.iter(|| {
-                let mut pos = 0u;
-                let mut reader = BufReader::new(data);
-                let mut buf = [0u8];
-                while pos < len {
-                    reader.read(buf);
-                    pos += 1;
-                }
-            });
-        }
 
         #[bench]
         fn bench_request_get(b: &mut Bencher) {
             let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
             let mut cb = BenchCallbacks { skip_body: true };
-            b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut cb) );
+            b.iter(|| Parser::new(Request).parse(data, &mut cb) );
         }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
             let mut h = HashMap::new();
             h.insert("Host".to_string(), "faultier.jp".to_string());
-            h.insert("User-Agent".to_string(), "test".to_string());
-            h.insert("Accept".to_string(), "application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+            h.insert("User-Agent".to_string(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:30.0) Gecko/20100101 Firefox/30.0".to_string());
+            h.insert("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string());
             h.insert("Accept-Encoding".to_string(), "gzip,deflate".to_string());
             h.insert("Accept-Language".to_string(), "ja,en-US;q=0.8,en;q=0.6".to_string());
+            h.insert("Connection".to_string(), "close".to_string());
+            h.insert("Cache-Control".to_string(), "max-age=0".to_string());
+            h.insert("Cookie".to_string(), "key1=value1; key2=value2; key3=value3; key4=value4; key5=value5".to_string());
+            h.insert("Referer".to_string(), "http://faultier.blog.jp/".to_string());
             if header.is_some() {
                 h.extend(header.unwrap().move_iter());
             }
