@@ -141,28 +141,31 @@ impl Show for HttpMethod {
     }
 }
 
-/// Parser callbacks.
-pub trait Callbacks {
+/// Parser event handler.
+pub trait Handler {
     /// Called when start to parsing of message.
     /// Default implementation is nothing to do.
     fn on_message_begin(&mut self, _: &Parser) {
     }
 
+    #[allow(unused_variable)]
     /// Called when url parsed.
     /// Default implementation is nothing to do.
-    fn on_url<'a>(&mut self, _: &Parser, _: &'a [u8]) -> IoResult<()> {
+    fn on_url<'a>(&mut self, _: &Parser, start: uint, end: uint) -> IoResult<()> {
         Ok(())
     }
 
+    #[allow(unused_variable)]
     /// Called when status parsed.
     /// Default implementation is nothing to do.
-    fn on_status<'a>(&mut self, _: &Parser, _: &'a [u8]) -> IoResult<()> {
+    fn on_status<'a>(&mut self, _: &Parser, start: uint, end: uint) -> IoResult<()> {
         Ok(())
     }
 
+    #[allow(unused_variable)]
     /// Called when header field's name parsed.
     /// Default implementation is nothing to do.
-    fn on_header_field<'a>(&mut self, _: &Parser, _: &'a [u8], _: &'a [u8]) -> IoResult<()> {
+    fn on_header_field<'a>(&mut self, _: &Parser, keyst: uint, keyen: uint, valst: uint, valen: uint) -> IoResult<()> {
         Ok(())
     }
 
@@ -172,9 +175,10 @@ pub trait Callbacks {
         return false;
     }
 
+    #[allow(unused_variable)]
     /// Called when body parsed.
     /// Default implementation is nothing to do.
-    fn on_body<'a>(&mut self, _: &Parser, _: &'a [u8]) -> IoResult<()> {
+    fn on_body<'a>(&mut self, _: &Parser, start: uint, end: uint) -> IoResult<()> {
         Ok(())
     }
 
@@ -209,7 +213,7 @@ pub enum ParseError {
     InvalidEOFState,
 }
 
-pub type ParseResult = Result<(uint, int), ParseError>;
+pub type ParseResult = Result<uint, ParseError>;
 
 static CR: char = '\r';
 static LF: char = '\n';
@@ -220,6 +224,7 @@ pub struct Parser {
     // parser internal state
     parser_type: Type,
     state: ParserState,
+    pos: uint,
     index: uint,
     sep: uint,
     skip: uint,
@@ -255,6 +260,7 @@ impl Parser {
             status_code: None,
             content_length: UINT_MAX,
             skip_body: false,
+            pos: 0,
             index: 0,
             sep: 0,
             skip: 0,
@@ -264,98 +270,80 @@ impl Parser {
     }
 
    /// Parse HTTP message.
-    pub fn parse<C: Callbacks>(&mut self, data: &[u8], callbacks: &mut C) -> ParseResult {
-        if self.state == Dead { return Ok((0, 0)) }
+    pub fn parse<C: Handler>(&mut self, data: &[u8], handler: &mut C) -> ParseResult {
+        if self.state == Dead { return Ok(0) }
         if self.state == Crashed { return Err(OtherParseError) }
-        if data.len() == 0 { return Ok((0, 0)) }
+        if data.len() == 0 { return Ok(0) }
 
         let mut read = 0u;
-        let mut pos  = 0u;
-        let mut needs = -1i;
         let len = data.len();
 
         loop {
-            pos = read;
             match self.state {
                 StartReq => {
-                    if len - pos < 3 {
-                        needs = 3 - (len - pos) as int;
-                        break;
-                    }
                     self.major = 0;
                     self.minor = 0;
                     self.http_version = None;
                     self.content_length = UINT_MAX;
                     self.skip_body = false;
-                    callbacks.on_message_begin(self);
-                    let maybe = match (data[pos] as char, data[pos+1] as char, data[pos+2] as char) {
-                        ('C', 'H', 'E') => HttpCheckout,
-                        ('C', 'O', 'N') => HttpConnect,
-                        ('C', 'O', 'P') => HttpCopy,
-                        ('D', 'E', 'L') => HttpDelete,
-                        ('G', 'E', 'T') => HttpGet,
-                        ('H', 'E', 'A') => HttpHead,
-                        ('L', 'I', 'N') => HttpLink,
-                        ('L', 'O', 'K') => HttpLock,
-                        ('M', '-', 'S') => HttpMsearch,
-                        ('M', 'E', 'R') => HttpMerge,
-                        ('M', 'K', 'A') => HttpMkActivity,
-                        ('M', 'K', 'C') => HttpMkCalendar,  // or MKCOL
-                        ('N', 'O', 'T') => HttpNotify,
-                        ('O', 'P', 'T') => HttpOptions,
-                        ('P', 'A', 'T') => HttpPatch,
-                        ('P', 'O', 'S') => HttpPost,
-                        ('P', 'R', 'O') => HttpPropPatch,    // or PROPFIND
-                        ('P', 'U', 'R') => HttpPurge,
-                        ('P', 'U', 'T') => HttpPut,
-                        ('R', 'E', 'P') => HttpReport,
-                        ('S', 'E', 'A') => HttpSearch,
-                        ('S', 'U', 'B') => HttpSubscribe,
-                        ('T', 'R', 'A') => HttpTrace,
-                        ('U', 'N', 'L') => HttpUnlink,      // or UNLOCK
-                        ('U', 'N', 'S') => HttpUnsubscribe,
-                        _               => { self.state = Crashed; return Err(InvalidMethod) },
-                    };
-                    if len - pos < maybe.len() + 1 {
-                        needs = (maybe.len() + 1) as int - (len - pos) as int;
-                        break;
-                    }
-                    read += 3;
-                    self.method = Some(maybe);
+                    handler.on_message_begin(self);
+                    self.method = Some(match data[read] as char {
+                        'C' => HttpConnect,     // or CHECKOUT, COPY
+                        'D' => HttpDelete,
+                        'G' => HttpGet,
+                        'H' => HttpHead,
+                        'L' => HttpLink,        // or LOCK
+                        'M' => HttpMkCol,       // or M-SEARCH, MERGE, MKACTIVITY, MKCALENDER
+                        'N' => HttpNotify,
+                        'O' => HttpOptions,
+                        'P' => HttpPut,         // or PATCH, POST, PROPPATCH, PROPFIND
+                        'R' => HttpReport,
+                        'S' => HttpSearch,      // or SUBSCRIBE
+                        'T' => HttpTrace,
+                        'U' => HttpUnlink,      // or UNLOCK, UNSUBSCRIBE
+                        _   => { self.state = Crashed; return Err(InvalidMethod) },
+                    });
+                    read += 1;
+                    self.pos += 1;
                     self.state = ReqMethod;
-                    self.index = 3;
+                    self.index = 1;
                 }
                 ReqMethod => {
-                    if pos == len { break }
-                    read += 1;
                     let method = self.method.unwrap();
-                    if data[pos] as char == ' ' && pos == method.len() {
+                    if data[read] as char == ' ' && self.pos == method.len() {
                         self.state = ReqUrl;
                         self.index = 0;
                     } else {
-                        if !method.hit(self.index, data[pos] as char) {
+                        if !method.hit(self.index, data[read] as char) {
                             self.method = Some(match method {
-                                HttpMkCalendar if self.index == 3 && data[pos] as char == 'O' => HttpMkCol,
-                                HttpPropPatch  if self.index == 4 && data[pos] as char == 'F' => HttpPropFind,
-                                HttpUnlink     if self.index == 3 && data[pos] as char == 'O' => HttpUnlock,
+                                HttpConnect    if self.index == 2 && data[read] as char == 'H' => HttpCheckout,
+                                HttpConnect    if self.index == 3 && data[read] as char == 'P' => HttpCheckout,
+                                HttpLink       if self.index == 1 && data[read] as char == 'O' => HttpLock,
+                                HttpMkCol      if self.index == 1 && data[read] as char == '-' => HttpMsearch,
+                                HttpMkCol      if self.index == 1 && data[read] as char == 'E' => HttpMerge,
+                                HttpMkCol      if self.index == 2 && data[read] as char == 'A' => HttpMkActivity,
+                                HttpMkCol      if self.index == 3 && data[read] as char == 'A' => HttpMkCalendar,
+                                HttpPut        if self.index == 1 && data[read] as char == 'A' => HttpPatch,
+                                HttpPut        if self.index == 1 && data[read] as char == 'O' => HttpPost,
+                                HttpPut        if self.index == 1 && data[read] as char == 'R' => HttpPropPatch,
+                                HttpPut        if self.index == 2 && data[read] as char == 'R' => HttpPurge,
+                                HttpPropPatch  if self.index == 4 && data[read] as char == 'F' => HttpPropFind,
+                                HttpSearch     if self.index == 1 && data[read] as char == 'U' => HttpSubscribe,
+                                HttpUnlink     if self.index == 2 && data[read] as char == 'S' => HttpUnsubscribe,
+                                HttpUnlink     if self.index == 3 && data[read] as char == 'O' => HttpUnlock,
                                 _ => { self.state = Crashed; return Err(InvalidMethod) },
                             });
                         }
                         self.index += 1;
                     }
+                    read += 1;
+                    self.pos += 1;
                 }
                 ReqUrl => {
-                    if pos == len {
-                        read -= self.index;
-                        self.index = 0;
-                        break
-                    }
-                    read += 1;
-                    match data[pos] as char {
+                    match data[read] as char {
                         ' ' => {
                             if self.index == 0 { self.state = Crashed; return Err(InvalidUrl) }
-                            let url = data.slice(pos-self.index, pos);
-                            match callbacks.on_url(self, url) {
+                            match handler.on_url(self, self.pos - self.index, self.pos) {
                                 Ok(()) => {
                                     self.state = ReqHttpStart;
                                     self.index = 0;
@@ -366,43 +354,45 @@ impl Parser {
                         CR | LF => {
                             if self.index == 0 { self.state = Crashed; return Err(InvalidUrl) }
                             self.http_version = Some(HTTP_0_9);
-                            // TODO: merge buffer
-                            let url = data.slice(pos-self.index, pos);
-                            match callbacks.on_url(self, url) {
+                            match handler.on_url(self, self.pos - self.index, self.pos) {
                                 Ok(()) => {
                                     self.state = Dead;
                                     self.index = 0;
-                                    needs = 0;
-                                    callbacks.on_message_complete(self);
+                                    self.pos = 0;
+                                    handler.on_message_complete(self);
+                                    read += 1;
                                     break;
                                 }
                                 Err(e) => { self.state = Crashed; return Err(UrlCallbackFail(e)) },
                             }
                         }
-                        _ => {
-                            self.index += 1;
-                        },
+                        _ => self.index += 1,
                     }
+                    read += 1;
+                    self.pos += 1;
                 }
                 ReqHttpStart => {
-                    read += 6;
-                    if data[pos] as char != 'H'
-                        || data[pos+1] as char != 'T'
-                            || data[pos+2] as char != 'T'
-                            || data[pos+3] as char != 'P'
-                            || data[pos+4] as char != '/'
-                            || data[pos+5] < '0' as u8
-                            || data[pos+5] > '9' as u8 {
-                                self.state = Crashed;
-                                return Err(InvalidVersion);
-                            }
-                    self.state = ReqHttpMajor;
-                    self.major = data[pos+5] as uint - '0' as uint;
-                    self.index += 1;
+                    let c = data[read] as char;
+                    if (c != 'H' && self.index == 0)
+                        || (c != 'T' && (self.index == 1 || self.index == 2))
+                        || (c != 'P' && self.index == 3)
+                        || (c != '/' && self.index == 4)
+                        || ((data[read] < '0' as u8 || data[read] > '9' as u8) && self.index == 5) {
+                            self.state = Crashed;
+                            return Err(InvalidVersion);
+                        }
+                    if self.index == 5 {
+                        self.state = ReqHttpMajor;
+                        self.major = data[read] as uint - '0' as uint;
+                        self.index = 1;
+                    } else {
+                        self.index += 1;
+                    }
+                    read += 1;
+                    self.pos += 1;
                 }
                 ReqHttpMajor => {
-                    read += 1;
-                    match data[pos] as char {
+                    match data[read] as char {
                         '.' if self.index > 0 => {
                             self.state = ReqHttpMinor;
                             self.index = 0;
@@ -414,10 +404,11 @@ impl Parser {
                         }
                         _ => { self.state = Crashed; return Err(InvalidVersion) },
                     }
+                    read += 1;
+                    self.pos += 1;
                 }
                 ReqHttpMinor => {
-                    read += 1;
-                    match data[pos] as char {
+                    match data[read] as char {
                         n if n >= '0' && n <= '9' => {
                             self.index += 1;
                             self.minor *= 10;
@@ -427,7 +418,7 @@ impl Parser {
                             None => { self.state = Crashed; return Err(InvalidVersion) },
                             v => {
                                 self.http_version = v;
-                                self.state = if data[pos] as char == CR {
+                                self.state = if data[read] as char == CR {
                                     ReqLineAlmostDone
                                 } else {
                                     HeaderFieldStart
@@ -437,36 +428,39 @@ impl Parser {
                         },
                         _ => { self.state = Crashed; return Err(InvalidVersion) },
                     }
+                    read += 1;
+                    self.pos += 1;
                 }
                 ReqLineAlmostDone => {
-                    read += 1;
-                    if data[pos] as char != LF {
+                    if data[read] as char != LF {
                         return Err(InvalidRequestLine);
                     }
                     self.state = HeaderFieldStart;
+                    read += 1;
+                    self.pos += 1;
                 }
                 HeaderFieldStart => {
-                    read += 1;
-                    match data[pos] as char {
+                    match data[read] as char {
                         CR => self.state = HeadersAlmostDone,
                         LF => {
                             self.state = HeadersDone;
-                            self.skip_body = callbacks.on_headers_complete(self);
+                            self.skip_body = handler.on_headers_complete(self);
                         }
-                        c if is_header_token(c) => {
+                        c if is_token(c) => {
                             self.state = HeaderField;
                             self.index = 1;
                         }
                         _ => { self.state = Crashed; return Err(InvalidHeaderField) },
                     }
+                    read += 1;
+                    self.pos += 1;
                 }
                 HeaderField => {
-                    read += 1;
-                    match data[pos] as char {
+                    match data[read] as char {
                         ':' => {
                             self.state = HeaderValueDiscardWS;
-                            self.sep = pos;
-                            self.skip = pos;
+                            self.sep = self.pos;
+                            self.skip = self.pos;
                             self.index += 1;
                         }
                         CR => {
@@ -477,15 +471,16 @@ impl Parser {
                             self.state = HeaderFieldStart;
                             self.index = 0;
                         }
-                        c if is_header_token(c) => {
+                        c if is_token(c) => {
                             self.index += 1;
                         }
                         _ => { self.state = Crashed; return Err(InvalidHeaderField) },
                     }
+                    read += 1;
+                    self.pos += 1;
                 }
                 HeaderValueDiscardWS => {
-                    read += 1;
-                    match data[pos] as char {
+                    match data[read] as char {
                         ' ' | '\t' => {
                             self.skip += 1;
                         },
@@ -496,77 +491,84 @@ impl Parser {
                             self.index += 1;
                         },
                     }
+                    read += 1;
+                    self.pos += 1;
                 }
                 HeaderValueDiscardWSAlmostDone => {
-                    read += 1;
-                    if data[pos] as char != LF { self.state = Crashed; return Err(InvalidHeaderField) }
+                    if data[read] as char != LF { self.state = Crashed; return Err(InvalidHeaderField) }
                     self.state = HeaderValueDiscardLWS;
+                    read += 1;
+                    self.pos += 1;
                 }
                 HeaderValueDiscardLWS => {
-                    read += 1;
-                    if data[pos] as char == ' ' || data[pos] as char == '\t' {
+                    if data[read] as char == ' ' || data[read] as char == '\t' {
                         self.state = HeaderValueDiscardWS;
                         self.skip += 1;
                     } else {
                         // header value is empty.
-                        let name = data.slice(pos-self.index, self.sep);
-                        match callbacks.on_header_field(self, name, []) {
+                        match handler.on_header_field(self, self.pos - self.index, self.sep, 0, 0) {
                             Err(e) => { self.state = Crashed; return Err(HeaderFieldCallbackFail(e)) },
                             _ => {
                                 self.index = 0;
+                                self.sep = 0;
                             },
                         }
-                        match data[pos] as char {
+                        match data[read] as char {
                             CR => self.state = HeadersAlmostDone,
                             LF => {
                                 self.state = HeadersDone;
-                                self.skip_body = callbacks.on_headers_complete(self);
+                                self.skip_body = handler.on_headers_complete(self);
                             }
-                            c if is_header_token(c) => {
+                            c if is_token(c) => {
                                 self.state = HeaderFieldStart;
                                 self.index = 1;
+                                self.sep = 0;
                             }
                             _ => { self.state = Crashed; return Err(InvalidHeaderField) },
                         }
                     }
+                    read += 1;
+                    self.pos += 1;
                 }
                 HeaderValue => {
-                    read += 1;
-                    match data[pos] as char {
+                    match data[read] as char {
                         CR | LF => {
-                            self.state = if data[pos] as char == CR {
+                            self.state = if data[read] as char == CR {
                                 HeaderAlmostDone
                             } else {
                                 HeaderFieldStart
                             };
-                            let name = data.slice(pos-(self.index+1), self.sep);
-                            let value = data.slice(self.skip+1, pos);
-                            match callbacks.on_header_field(self, name, value) {
+                            match handler.on_header_field(self, self.pos-(self.index+1), self.sep, self.skip+1, self.pos) {
                                 Err(e) => { self.state = Crashed; return Err(HeaderFieldCallbackFail(e)) },
-                                _ => self.index = 0,
+                                _ => {
+                                    self.index = 0;
+                                    self.sep = 0;
+                                    self.skip = 0;
+                                },
                             }
                         }
-                        _ => {
-                            self.index += 1;
-                        },
+                        _ => self.index += 1,
                     }
+                    read += 1;
+                    self.pos += 1;
                 }
                 HeaderAlmostDone => {
-                    read += 1;
-                    if data[pos] as char != LF { self.state = Crashed; return Err(InvalidHeaderField) }
+                    if data[read] as char != LF { self.state = Crashed; return Err(InvalidHeaderField) }
                     self.state = HeaderFieldStart;
+                    read += 1;
+                    self.pos += 1;
                 }
                 HeadersAlmostDone => {
+                    if data[read] as char != LF { self.state = Crashed; return Err(InvalidHeaders) }
+                    self.pos += 1;
                     read += 1;
-                    if data[pos] as char != LF { self.state = Crashed; return Err(InvalidHeaders) }
-                    if callbacks.on_headers_complete(self) || self.skip_body {
+                    if handler.on_headers_complete(self) || self.skip_body {
                         self.state = match self.parser_type {
                             Request  => StartReq,
                             Response => StartRes,
                             Both     => StartReqOrRes,
                         };
-                        needs = 0;
-                        callbacks.on_message_complete(self);
+                        handler.on_message_complete(self);
                         break;
                     }
                     self.state = HeadersDone;
@@ -579,8 +581,8 @@ impl Parser {
                             Response => StartRes,
                             Both     => StartReqOrRes,
                         };
-                        needs = 0;
-                        callbacks.on_message_complete(self);
+                        handler.on_message_complete(self);
+                        self.pos = 0;
                         break;
                     }
                     match self.content_length {
@@ -590,8 +592,8 @@ impl Parser {
                                 Response => StartRes,
                                 Both     => StartReqOrRes,
                             };
-                            needs = 0;
-                            callbacks.on_message_complete(self);
+                            handler.on_message_complete(self);
+                            self.pos = 0;
                             break;
                         }
                         UINT_MAX => {
@@ -601,21 +603,23 @@ impl Parser {
                                     Response => StartRes,
                                     Both     => StartReqOrRes,
                                 };
-                                needs = 0;
-                                callbacks.on_message_complete(self);
+                                handler.on_message_complete(self);
+                                self.pos = 0;
                                 break;
                             }
                             self.state = BodyIdentityEOF;
                         }
                         _ => self.state = BodyIdentity,
                     }
+                    self.pos += 1;
                 }
                 Dead | Crashed => unreachable!(),
                 _ => unimplemented!()
             }
+            if read == len { break }
         }
 
-        return Ok((read, needs));
+        return Ok(read);
     }
 
     fn needs_eof(&mut self) -> bool {
@@ -637,7 +641,7 @@ impl Parser {
 }
 
 #[inline]
-fn is_header_token(c: char) -> bool {
+fn is_token(c: char) -> bool {
     (c >= '^' && c <= 'z')
         || (c >= 'A' && c <= 'Z')
         || (c >= '-' && c <= '.')
@@ -674,9 +678,6 @@ enum ParserState {
     BodyIdentity,
     BodyIdentityEOF,
     Crashed,
-
-    // new
-    RequestLine,
 }
 
 #[cfg(test)]
@@ -686,35 +687,55 @@ mod test {
     use std::io::{InvalidInput, IoResult, standard_error};
     use std::str::{SendStr, from_utf8};
 
-    pub struct TestCallbacks {
+    pub struct TestHandler<'a> {
         skip_body: bool,
         started: bool,
         url: Option<String>,
         headers_finished: bool,
         headers: HashMap<SendStr, SendStr>,
         finished: bool,
+        data: &'a [u8],
     }
 
-    impl TestCallbacks {
-        fn new(skip_body: bool) -> TestCallbacks {
-            TestCallbacks {
+    impl<'a> TestHandler<'a> {
+        fn new(skip_body: bool, data: &'a [u8]) -> TestHandler<'a> {
+            TestHandler {
                 skip_body: skip_body,
                 started: false,
                 url: None,
                 headers_finished: false,
                 headers: HashMap::new(),
                 finished: false,
+                data: data,
+            }
+        }
+
+        fn assert_general_headers(&self) {
+            let mut h = HashMap::new();
+            h.insert("Host".into_maybe_owned(), "faultier.jp".into_maybe_owned());
+            h.insert("User-Agent".into_maybe_owned(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:30.0) Gecko/20100101 Firefox/30.0".into_maybe_owned());
+            h.insert("Accept".into_maybe_owned(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into_maybe_owned());
+            h.insert("Accept-Encoding".into_maybe_owned(), "gzip,deflate".into_maybe_owned());
+            h.insert("Accept-Language".into_maybe_owned(), "ja,en-US;q=0.8,en;q=0.6".into_maybe_owned());
+            h.insert("Connection".into_maybe_owned(), "close".into_maybe_owned());
+            h.insert("Cache-Control".into_maybe_owned(), "max-age=0".into_maybe_owned());
+            h.insert("Cookie".into_maybe_owned(), "key1=value1; key2=value2".into_maybe_owned());
+            h.insert("Referer".into_maybe_owned(), "http://faultier.blog.jp/".into_maybe_owned());
+ 
+            assert!(self.headers_finished);
+            for (name, value) in h.iter() {
+                assert_eq!(self.headers.find(name), Some(value));
             }
         }
     }
 
-    impl Callbacks for TestCallbacks {
+    impl<'a> Handler for TestHandler<'a> {
         fn on_message_begin(&mut self, _: &Parser) {
             self.started = true;
         }
 
-        fn on_url<'a>(&mut self, _: &Parser, data: &'a [u8]) -> IoResult<()> {
-            match from_utf8(data) {
+        fn on_url<'b>(&mut self, _: &Parser, start: uint, end: uint) -> IoResult<()> {
+            match from_utf8(self.data.slice(start, end)) {
                 Some(url) => {
                     self.url = Some(url.to_string());
                     Ok(())
@@ -728,18 +749,18 @@ mod test {
             self.skip_body
         }
 
-        fn on_header_field<'a>(&mut self, _: &Parser, name: &'a [u8], value: &'a [u8]) -> IoResult<()> {
+        fn on_header_field<'a>(&mut self, _: &Parser, keyst: uint, keyen: uint, valst: uint, valen: uint) -> IoResult<()> {
             let mut header_name: SendStr;
             let mut header_value: SendStr;
             {
-                let v = Vec::from_slice(name);
+                let v = Vec::from_slice(self.data.slice(keyst, keyen));
                 header_name = match String::from_utf8(v) {
                     Ok(name) => name.into_maybe_owned(),
                     Err(_) => return Err(standard_error(InvalidInput)),
                 }
             }
             {
-                let v = Vec::from_slice(value);
+                let v = Vec::from_slice(self.data.slice(valst, valen));
                 header_value = match String::from_utf8(v) {
                     Ok(value) => value.into_maybe_owned(),
                     Err(_) => return Err(standard_error(InvalidInput)),
@@ -756,66 +777,50 @@ mod test {
 
     #[test]
     fn test_no_message() {
+        let data = [];
         let mut parser = Parser::new(Request);
-        let mut callbacks = TestCallbacks::new(true);
-        assert_eq!(parser.parse([], &mut callbacks), Ok((0, 0)));
-        assert!(!callbacks.started);
-        assert!(!callbacks.finished);
+        let mut handler = TestHandler::new(true, data);
+        assert_eq!(parser.parse(data, &mut handler), Ok(0));
+        assert!(!handler.started);
+        assert!(!handler.finished);
     }
 
     #[test]
     fn test_partial_data() {
         let data = "HEAD /hello.txt HTTP/1.0\r\n\r\n".as_bytes();
         let mut parser = Parser::new(Request);
-        let mut cb = TestCallbacks::new(true);
+        let mut handler = TestHandler::new(true, data);
 
-        // parse "HE", len < 3
+        // parse "HE"
         let part = data.slice(0, 2);
-        let (read, needs) = parser.parse(part, &mut cb).unwrap();
-        assert_eq!(read, 0);
-        assert_eq!(needs, 1);
-        assert_eq!(parser.state, super::StartReq);
-        assert!(!cb.started);
-        assert!(!cb.finished);
+        assert_eq!(parser.parse(part, &mut handler), Ok(2));
+        assert_eq!(parser.state, super::ReqMethod);
+        assert!(handler.started);
+        assert!(!handler.finished);
 
-        // parse "HEA", len < HttpHead.len()
-        let len = ((part.len() as int - read as int) + needs) as uint;
-        let part = data.slice(read, len);
-        let (read, needs) = parser.parse(part, &mut cb).unwrap();
-        assert_eq!(read, 0);
-        assert_eq!(needs, 2);
-        assert_eq!(parser.state, super::StartReq);
-        assert!(cb.started);
-        assert!(!cb.finished);
-
-        // parse "HEAD "
-        let len = ((part.len() as int - read as int) + needs) as uint;
-        let part = data.slice(read, len);
-        let (read, needs) = parser.parse(part, &mut cb).unwrap();
-        assert_eq!(read, 5);
-        assert_eq!(needs, -1);
+        // parse "AD "
+        let part = data.slice(2, 5);
+        assert_eq!(parser.parse(part, &mut handler), Ok(3));
         assert_eq!(parser.state, super::ReqUrl);
-        assert!(cb.started);
-        assert!(!cb.finished);
+        assert_eq!(parser.method, Some(HttpHead));
+        assert!(!handler.finished);
 
-        // parse "/he"
-        let part = data.slice(5, 8);
-        let (read, needs) = parser.parse(part, &mut cb).unwrap();
-        assert_eq!(read, 0);
-        assert_eq!(needs, -1);
+        // parse "/hello"
+        let part = data.slice(5, 11);
+        assert_eq!(parser.parse(part, &mut handler), Ok(6));
         assert_eq!(parser.state, super::ReqUrl);
-        assert!(!cb.finished);
+        assert!(!handler.finished);
 
-        // parse "/hello.txt HTTP/1.0"
-        let part = data.slice_from(5);
-        let (read, needs) = parser.parse(part, &mut cb).unwrap();
-        assert_eq!(read, part.len());
-        assert_eq!(needs, 0);
-        assert!(cb.finished);
+        // parse ".txt HTTP/1.0"
+        let part = data.slice_from(11);
+        assert_eq!(parser.parse(part, &mut handler), Ok(part.len()));
+        assert_eq!(handler.url, Some("/hello.txt".to_string()));
+        assert_eq!(parser.http_version, Some(HTTP_1_0));
+        assert!(handler.finished);
     }
 
     mod http_0_9 {
-        use super::TestCallbacks;
+        use super::TestHandler;
         use super::super::*;
 
         #[test]
@@ -823,21 +828,21 @@ mod test {
             let msg = "GET /\r\n";
             let data = msg.as_bytes();
             let mut parser = Parser::new(Request);
-            let mut callbacks = TestCallbacks::new(true);
+            let mut handler = TestHandler::new(true, data);
 
-            assert_eq!(parser.parse(data, &mut callbacks), Ok((6, 0)));
-            assert!(callbacks.started);
-            assert_eq!(callbacks.url, Some("/".to_string()));
+            assert_eq!(parser.parse(data, &mut handler), Ok(6));
+            assert!(handler.started);
+            assert_eq!(handler.url, Some("/".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_0_9));
-            assert!(callbacks.finished);
+            assert!(handler.finished);
 
             // Parser is dead, no more read.
-            assert_eq!(parser.parse(data, &mut callbacks), Ok((0, 0)));
+            assert_eq!(parser.parse(data, &mut handler), Ok(0));
         }
     }
 
     mod http_1_0 {
-        use super::TestCallbacks;
+        use super::TestHandler;
         use super::super::*;
         use std::collections::HashMap;
 
@@ -846,27 +851,27 @@ mod test {
             let msg = "GET / HTTP/1.0\r\n\r\n";
             let data = msg.as_bytes();
             let mut parser = Parser::new(Request);
-            let mut callbacks = TestCallbacks::new(true);
-            assert_eq!(parser.parse(data, &mut callbacks), Ok((data.len(), 0)));
-            assert!(callbacks.started);
-            assert_eq!(callbacks.url, Some("/".to_string()));
+            let mut handler = TestHandler::new(true, data);
+            assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
+            assert!(handler.started);
+            assert_eq!(handler.url, Some("/".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_1_0));
-            assert!(callbacks.headers_finished);
-            assert!(callbacks.finished);
+            assert!(handler.headers_finished);
+            assert!(handler.finished);
         }
 
         #[test]
         fn test_request_get() {
-            let mut parser = Parser::new(Request);
-            let mut callbacks = TestCallbacks::new(true);
             let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
-            assert_eq!(parser.parse(data, &mut callbacks), Ok((data.len(), 0)));
-            assert!(callbacks.started);
-            assert_eq!(callbacks.url, Some("/tag/Rust".to_string()));
+            let mut parser = Parser::new(Request);
+            let mut handler = TestHandler::new(true, data);
+            assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
+            assert!(handler.started);
+            assert_eq!(handler.url, Some("/tag/Rust".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_1_0));
-            assert_general_headers(&callbacks);
-            assert!(callbacks.finished);
+            assert!(handler.finished);
+            handler.assert_general_headers();
         }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
@@ -896,43 +901,25 @@ mod test {
             }
             vec.connect(nl.as_slice())
         }
-
-        fn assert_general_headers(cb: &TestCallbacks) {
-            let mut h = HashMap::new();
-            h.insert("Host".into_maybe_owned(), "faultier.jp".into_maybe_owned());
-            h.insert("User-Agent".into_maybe_owned(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:30.0) Gecko/20100101 Firefox/30.0".into_maybe_owned());
-            h.insert("Accept".into_maybe_owned(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into_maybe_owned());
-            h.insert("Accept-Encoding".into_maybe_owned(), "gzip,deflate".into_maybe_owned());
-            h.insert("Accept-Language".into_maybe_owned(), "ja,en-US;q=0.8,en;q=0.6".into_maybe_owned());
-            h.insert("Connection".into_maybe_owned(), "close".into_maybe_owned());
-            h.insert("Cache-Control".into_maybe_owned(), "max-age=0".into_maybe_owned());
-            h.insert("Cookie".into_maybe_owned(), "key1=value1; key2=value2".into_maybe_owned());
-            h.insert("Referer".into_maybe_owned(), "http://faultier.blog.jp/".into_maybe_owned());
- 
-            assert!(cb.headers_finished);
-            for (name, value) in h.iter() {
-                assert_eq!(cb.headers.find(name), Some(value));
-            }
-        }
     }
 
     mod http_1_1 {
-        use super::TestCallbacks;
+        use super::TestHandler;
         use super::super::*;
         use std::collections::HashMap;
 
         #[test]
         fn test_request_get() {
-            let mut parser = Parser::new(Request);
-            let mut callbacks = TestCallbacks::new(true);
             let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
-            assert_eq!(parser.parse(data, &mut callbacks), Ok((data.len(), 0)));
-            assert!(callbacks.started);
-            assert_eq!(callbacks.url, Some("/tag/Rust".to_string()));
+            let mut parser = Parser::new(Request);
+            let mut handler = TestHandler::new(true, data);
+            assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
+            assert!(handler.started);
+            assert_eq!(handler.url, Some("/tag/Rust".to_string()));
             assert_eq!(parser.http_version, Some(HTTP_1_1));
-            assert_general_headers(&callbacks);
-            assert!(callbacks.finished);
+            assert!(handler.finished);
+            handler.assert_general_headers();
         }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
@@ -963,23 +950,6 @@ mod test {
             vec.connect(nl.as_slice())
         }
 
-        fn assert_general_headers(cb: &TestCallbacks) {
-            let mut h = HashMap::new();
-            h.insert("Host".into_maybe_owned(), "faultier.jp".into_maybe_owned());
-            h.insert("User-Agent".into_maybe_owned(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:30.0) Gecko/20100101 Firefox/30.0".into_maybe_owned());
-            h.insert("Accept".into_maybe_owned(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into_maybe_owned());
-            h.insert("Accept-Encoding".into_maybe_owned(), "gzip,deflate".into_maybe_owned());
-            h.insert("Accept-Language".into_maybe_owned(), "ja,en-US;q=0.8,en;q=0.6".into_maybe_owned());
-            h.insert("Connection".into_maybe_owned(), "close".into_maybe_owned());
-            h.insert("Cache-Control".into_maybe_owned(), "max-age=0".into_maybe_owned());
-            h.insert("Cookie".into_maybe_owned(), "key1=value1; key2=value2".into_maybe_owned());
-            h.insert("Referer".into_maybe_owned(), "http://faultier.blog.jp/".into_maybe_owned());
- 
-            assert!(cb.headers_finished);
-            for (name, value) in h.iter() {
-                assert_eq!(cb.headers.find(name), Some(value));
-            }
-        }
     }
 }
 
@@ -988,23 +958,23 @@ mod bench {
     use super::*;
     use test::Bencher;
 
-    struct BenchCallbacks {
+    struct BenchHandler {
         skip_body: bool
     }
 
-    impl Callbacks for BenchCallbacks {
+    impl Handler for BenchHandler {
         fn on_headers_complete(&mut self, _: &Parser) -> bool { self.skip_body }
     }
 
     #[bench]
     fn bench_no_message(b: &mut Bencher) {
         let buf: &[u8] = [];
-        let mut cb = BenchCallbacks { skip_body: true };
-        b.iter(|| Parser::new(Request).parse(buf, &mut cb) );
+        let mut handler = BenchHandler { skip_body: true };
+        b.iter(|| Parser::new(Request).parse(buf, &mut handler) );
     }
 
     mod http_0_9 {
-        use super::BenchCallbacks;
+        use super::BenchHandler;
         use super::super::*;
         use test::Bencher;
 
@@ -1012,13 +982,13 @@ mod bench {
         fn bench_simple_request_get(b: &mut Bencher) {
             let msg = "GET /\r\n";
             let data = msg.as_bytes();
-            let mut cb = BenchCallbacks { skip_body: true };
-            b.iter(|| Parser::new(Request).parse(data, &mut cb) );
+            let mut handler = BenchHandler { skip_body: true };
+            b.iter(|| Parser::new(Request).parse(data, &mut handler) );
         }
     }
 
     mod http_1_0 {
-        use super::BenchCallbacks;
+        use super::BenchHandler;
         use super::super::*;
         use test::Bencher;
         use std::collections::HashMap;
@@ -1027,16 +997,16 @@ mod bench {
         fn bench_request_without_header(b: &mut Bencher) {
             let msg = "GET / HTTP/1.0\r\n\r\n";
             let data = msg.as_bytes();
-            let mut cb = BenchCallbacks { skip_body: true };
-            b.iter(|| Parser::new(Request).parse(data, &mut cb) );
+            let mut handler = BenchHandler { skip_body: true };
+            b.iter(|| Parser::new(Request).parse(data, &mut handler) );
         }
 
         #[bench]
         fn bench_request_get(b: &mut Bencher) {
             let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
-            let mut cb = BenchCallbacks { skip_body: true };
-            b.iter(|| Parser::new(Request).parse(data, &mut cb) );
+            let mut handler = BenchHandler { skip_body: true };
+            b.iter(|| Parser::new(Request).parse(data, &mut handler) );
         }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
@@ -1069,7 +1039,7 @@ mod bench {
     }
 
     mod http_1_1 {
-        use super::BenchCallbacks;
+        use super::BenchHandler;
         use super::super::*;
         use test::Bencher;
         use std::collections::HashMap;
@@ -1078,8 +1048,8 @@ mod bench {
         fn bench_request_get(b: &mut Bencher) {
             let msg = create_request("GET", "/tag/Rust", None, None);
             let data = msg.as_bytes();
-            let mut cb = BenchCallbacks { skip_body: true };
-            b.iter(|| Parser::new(Request).parse(data, &mut cb) );
+            let mut handler = BenchHandler { skip_body: true };
+            b.iter(|| Parser::new(Request).parse(data, &mut handler) );
         }
 
         fn create_request(method: &'static str, url: &'static str, header: Option<HashMap<String, String>>, body: Option<String>) -> String {
