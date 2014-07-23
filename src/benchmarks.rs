@@ -45,6 +45,14 @@ mod http_1_0 {
         let mut handler = BenchHandler { skip_body: true };
         b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut handler) );
     }
+
+    #[bench]
+    fn bench_response_without_header(b: &mut Bencher) {
+        let msg = "HTTP/1.0 200 OK\r\n\r\n";
+        let data = msg.as_bytes();
+        let mut handler = BenchHandler { skip_body: true };
+        b.iter(|| Parser::new(Response).parse(&mut BufReader::new(data), &mut handler) );
+    }
 }
 
 mod http_1_1 {

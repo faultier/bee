@@ -153,13 +153,6 @@ pub trait Handler {
     }
 
     #[allow(unused_variable)]
-    /// Called when status parsed.
-    /// Default implementation is nothing to do.
-    fn on_status(&mut self, parser: &Parser, length: uint) -> IoResult<()> {
-        Ok(())
-    }
-
-    #[allow(unused_variable)]
     /// Called when header field's name parsed.
     /// Default implementation is nothing to do.
     fn on_header_field(&mut self, parser: &Parser, length: uint) -> IoResult<()> {
@@ -210,6 +203,10 @@ pub enum ParseError {
     InvalidVersion,
     /// Invalid request line.
     InvalidRequestLine,
+    /// Invalid status code.
+    InvalidStatusCode,
+    /// Invalid status line.
+    InvalidStatusLine,
     /// Invalid header field.
     InvalidHeaderField,
     /// Invalid header section.
@@ -257,7 +254,7 @@ pub struct Parser {
     keep_alive: bool,
 
     // response
-    status_code: Option<uint>,
+    status_code: uint,
 }
 
 impl Parser {
@@ -269,7 +266,7 @@ impl Parser {
             state: reset_state!(t),
             hstate: HeaderGeneral,
             method: None,
-            status_code: None,
+            status_code: 0,
             content_length: UINT_MAX,
             skip_body: false,
             index: 0,
@@ -302,7 +299,6 @@ impl Parser {
                     self.http_version = None;
                     self.content_length = UINT_MAX;
                     self.skip_body = false;
-                    handler.on_message_begin(self);
                     self.method = Some(match buf[0] as char {
                         'C' => HttpConnect,     // or CHECKOUT, COPY
                         'D' => HttpDelete,
@@ -317,10 +313,29 @@ impl Parser {
                         'S' => HttpSearch,      // or SUBSCRIBE
                         'T' => HttpTrace,
                         'U' => HttpUnlink,      // or UNLOCK, UNSUBSCRIBE
+                        CR | LF => break,
                         _   => { self.state = Crashed; return Err(InvalidMethod) },
                     });
+                    handler.on_message_begin(self);
                     self.state = ReqMethod;
                     self.index = 1;
+                }
+                StartRes => {
+                    self.major = 0;
+                    self.minor = 0;
+                    self.status_code = 0;
+                    self.http_version = None;
+                    self.content_length = UINT_MAX;
+                    self.skip_body = false;
+                    match buf[0] as char {
+                        'H' => {
+                            self.state = ResHttpStart;
+                            self.index = 1;
+                        },
+                        CR | LF => break,
+                        _   => { self.state = Crashed; return Err(InvalidMethod) },
+                    }
+                    handler.on_message_begin(self);
                 }
                 ReqMethod => {
                     let method = self.method.unwrap();
@@ -440,6 +455,97 @@ impl Parser {
                 ReqLineAlmostDone => {
                     if buf[0] as char != LF {
                         return Err(InvalidRequestLine);
+                    }
+                    self.state = HeaderFieldStart;
+                }
+                ResHttpStart => {
+                    let c = buf[0] as char;
+                    if (c != 'T' && (self.index == 1 || self.index == 2))
+                        || (c != 'P' && self.index == 3)
+                        || (c != '/' && self.index == 4)
+                        || ((buf[0] < '0' as u8 || buf[0] > '9' as u8) && self.index == 5) {
+                            self.state = Crashed;
+                            return Err(InvalidVersion);
+                        }
+                    if self.index == 5 {
+                        self.state = ResHttpMajor;
+                        self.major = buf[0] as uint - '0' as uint;
+                        self.index = 1;
+                    } else {
+                        self.index += 1;
+                    }
+                }
+                ResHttpMajor => {
+                    match buf[0] as char {
+                        '.' if self.index > 0 => {
+                            self.state = ResHttpMinor;
+                            self.index = 0;
+                        }
+                        n if n >= '0' && n <= '9' => {
+                            self.index += 1;
+                            self.major *= 10;
+                            self.major += n as uint - '0' as uint;
+                        }
+                        _ => { self.state = Crashed; return Err(InvalidVersion) },
+                    }
+                }
+                ResHttpMinor => {
+                    match buf[0] as char {
+                        n if n >= '0' && n <= '9' => {
+                            self.index += 1;
+                            self.minor *= 10;
+                            self.minor += n as uint - '0' as uint;
+                        }
+                        ' ' if self.index > 0 => match HttpVersion::find(self.major, self.minor) {
+                            None => { self.state = Crashed; return Err(InvalidVersion) },
+                            v => {
+                                self.http_version = v;
+                                self.keep_alive = v == Some(HTTP_1_1);
+                                self.state = ResStatusCode;
+                                self.index = 0;
+                            }
+                        },
+                        _ => { self.state = Crashed; return Err(InvalidVersion) },
+                    }
+                }
+                ResStatusCodeStart => {
+                    if buf[0] >= '0' as u8 && buf[0] <= '9' as u8 {
+                        self.state = ResStatusCode;
+                        self.status_code = buf[0] as uint - '0' as uint;
+                        self.index = 1;
+                    } else if buf[0] as char != ' ' {
+                        self.state = Crashed;
+                        return Err(InvalidStatusCode);
+                    }
+                }
+                ResStatusCode => {
+                    if buf[0] >= '0' as u8 && buf[0] <= '9' as u8 && self.index < 3 {
+                        self.status_code *= 10;
+                        self.status_code += buf[0] as uint - '0' as uint;
+                        self.index += 1;
+                    } else {
+                        self.state = match buf[0] as char {
+                            ' ' => ResStatus,
+                            CR  => ResLineAlmostDone,
+                            LF  => HeaderFieldStart,
+                            _   => {
+                                self.state = Crashed;
+                                return Err(InvalidStatusLine);
+                            }
+                        };
+                        self.index = 0;
+                    }
+                }
+                ResStatus => {
+                    self.state = match buf[0] as char {
+                        CR => ResLineAlmostDone,
+                        LF => HeaderFieldStart,
+                        _  => ResStatus,
+                    };
+                }
+                ResLineAlmostDone => {
+                    if buf[0] as char != LF {
+                        return Err(InvalidStatusLine);
                     }
                     self.state = HeaderFieldStart;
                 }
@@ -676,6 +782,11 @@ impl Parser {
         self.http_version
     }
 
+    /// HTTP version
+    pub fn get_status_code(&self) -> uint {
+        self.status_code
+    }
+
     /// Connection: keep-alive or Connection: close
     pub fn should_keep_alive(&self) -> bool {
         self.keep_alive
@@ -690,14 +801,11 @@ impl Parser {
         if self.parser_type == Request {
             return false;
         }
-        if self.status_code.is_some() {
-            let status = self.status_code.unwrap();
-            if status / 100 == 1 ||     // 1xx e.g. Continue
-                status == 204 ||        // No Content
-                status == 304 ||        // Not Modified
-                self.skip_body {
-                return false;
-            }
+        if self.status_code / 100 == 1 ||     // 1xx e.g. Continue
+            self.status_code == 204 ||        // No Content
+            self.status_code == 304 ||        // Not Modified
+            self.skip_body {
+            return false;
         }
         // TODO: chanked
         return true;
@@ -729,6 +837,13 @@ enum ParserState {
     ReqHttpMajor,
     ReqHttpMinor,
     ReqLineAlmostDone,
+    ResHttpStart,
+    ResHttpMajor,
+    ResHttpMinor,
+    ResStatusCodeStart,
+    ResStatusCode,
+    ResStatus,
+    ResLineAlmostDone,
     HeaderFieldStart,
     HeaderField,
     HeaderValueDiscardWS,

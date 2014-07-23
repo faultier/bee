@@ -38,7 +38,7 @@ mod http_0_9 {
 
 mod http_1_0 {
     use parser::*;
-    use super::{TestHandler, create_request};
+    use super::{TestHandler, assert_general_headers, create_request};
     use std::io::BufReader;
 
     #[test]
@@ -57,17 +57,17 @@ mod http_1_0 {
 
     #[test]
     fn test_request_get() {
-        let msg = create_request("GET", "/tag/Rust", 0, None, None);
+        let msg = create_request("GET", "/get", 0, None, None);
         let data = msg.as_bytes();
         let mut parser = Parser::new(Request);
         let mut handler = TestHandler::new(true);
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
         assert!(!parser.should_keep_alive());
         assert!(handler.started);
-        assert_eq!(handler.url, Some("/tag/Rust".to_string()));
+        assert_eq!(handler.url, Some("/get".to_string()));
         assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
         assert!(handler.finished);
-        handler.assert_general_headers();
+        assert_general_headers(&handler);
     }
 
     #[test]
@@ -79,11 +79,24 @@ mod http_1_0 {
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
         assert!(parser.should_keep_alive());
     }
+
+    #[test]
+    fn test_response_without_header() {
+        let msg = "HTTP/1.0 200 OK\r\n\r\n";
+        let data = msg.as_bytes();
+        let mut parser = Parser::new(Response);
+        let mut handler = TestHandler::new(true);
+        assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
+        assert!(handler.started);
+        assert!(handler.finished);
+        assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
+        assert_eq!(parser.get_status_code(), 200);
+    }
 }
 
 mod http_1_1 {
     use parser::*;
-    use super::{TestHandler, create_request};
+    use super::{TestHandler, assert_general_headers, create_request};
     use std::io::BufReader;
 
     #[test]
@@ -98,7 +111,7 @@ mod http_1_1 {
         assert_eq!(handler.url, Some("/tag/Rust".to_string()));
         assert_eq!(parser.get_http_version(), Some(HTTP_1_1));
         assert!(handler.finished);
-        handler.assert_general_headers();
+        assert_general_headers(&handler);
     }
 
     #[test]
@@ -109,6 +122,19 @@ mod http_1_1 {
         let mut handler = TestHandler::new(true);
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
         assert!(!parser.should_keep_alive());
+    }
+
+    #[test]
+    fn test_response_without_header() {
+        let msg = "HTTP/1.1 200 OK\r\n\r\n";
+        let data = msg.as_bytes();
+        let mut parser = Parser::new(Response);
+        let mut handler = TestHandler::new(true);
+        assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
+        assert!(handler.started);
+        assert!(handler.finished);
+        assert_eq!(parser.get_http_version(), Some(HTTP_1_1));
+        assert_eq!(parser.get_status_code(), 200);
     }
 }
 
@@ -132,15 +158,6 @@ impl TestHandler {
             headers: HashMap::new(),
             finished: false,
             buffer: Vec::new(),
-        }
-    }
-
-    fn assert_general_headers(&self) {
-        assert!(self.headers_finished);
-        for chunk in general_headers().as_slice().chunks(2) {
-            let (name, value) = (chunk[0], chunk[1]);
-            println!("{}, {}", name, value);
-            assert_eq!(self.headers.find(&name.into_maybe_owned()), Some(&value.into_maybe_owned()));
         }
     }
 }
@@ -207,6 +224,15 @@ fn general_headers() -> Vec<&'static str> {
          "Cache-Control", "max-age=0",
          "Cookie", "key1=value1; key2=value2",
          "Referer", "http://faultier.blog.jp/")
+}
+
+fn assert_general_headers(handler: &TestHandler) {
+    assert!(handler.headers_finished);
+    for chunk in general_headers().as_slice().chunks(2) {
+        let (name, value) = (chunk[0], chunk[1]);
+        println!("{}, {}", name, value);
+        assert_eq!(handler.headers.find(&name.into_maybe_owned()), Some(&value.into_maybe_owned()));
+    }
 }
 
 fn create_request(method: &'static str, url: &'static str, version: uint, header: Option<Vec<&'static str>>, body: Option<String>) -> String {
