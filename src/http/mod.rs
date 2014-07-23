@@ -187,7 +187,7 @@ pub trait Handler {
     }
 
     /// Push partial data, e.g. URL, header field, message body.
-    fn push_data(&mut self, &Parser, &[u8]);
+    fn push_data(&mut self, &Parser, u8);
 }
 
 /// A list specifying categories of parse errors.
@@ -287,6 +287,29 @@ impl Parser {
         let mut read = 0u;
 
         loop {
+            if self.state == HeadersDone {
+                if self.skip_body {
+                    self.state = reset_state!(self.parser_type);
+                    handler.on_message_complete(self);
+                    break;
+                }
+                match self.content_length {
+                    0u => {
+                        self.state = reset_state!(self.parser_type);
+                        handler.on_message_complete(self);
+                        break;
+                    }
+                    UINT_MAX => {
+                        if self.parser_type == Request || !self.needs_eof() {
+                            self.state = reset_state!(self.parser_type);
+                            handler.on_message_complete(self);
+                            break;
+                        }
+                        self.state = BodyIdentityEOF;
+                    }
+                    _ => self.state = BodyIdentity,
+                }
+            }
             match reader.read(buf) {
                 Ok(len) => read += len,
                 Err(IoError { kind: EndOfFile, ..}) => break,
@@ -392,7 +415,7 @@ impl Parser {
                             }
                         }
                         _ => {
-                            handler.push_data(self, buf);
+                            handler.push_data(self, buf[0]);
                             self.index += 1;
                         }
                     }
@@ -564,7 +587,7 @@ impl Parser {
                                 'u' => HeaderUpgrade,
                                 _   => HeaderGeneral,
                             };
-                            handler.push_data(self, buf);
+                            handler.push_data(self, buf[0]);
                             self.index = 1;
                         }
                         _ => { self.state = Crashed; return Err(InvalidHeaderField) },
@@ -621,7 +644,7 @@ impl Parser {
                                     _ => HeaderGeneral,
                                 };
                             }
-                            handler.push_data(self, buf);
+                            handler.push_data(self, buf[0]);
                             self.index += 1;
                         }
                         _ => { self.state = Crashed; return Err(InvalidHeaderField) },
@@ -638,10 +661,14 @@ impl Parser {
                                 HeaderConnection if c == 'k' => HeaderMatchingKeepAlive,
                                 HeaderConnection if c == 'c' => HeaderMatchingClose,
                                 HeaderConnection if c == 'u' => HeaderMatchingUpgrade,
+                                HeaderContentLength => {
+                                    self.content_length = buf[0] as uint - '0' as uint;
+                                    HeaderContentLength
+                                },
                                 _ => HeaderGeneral,
                             };
                             self.state = HeaderValue;
-                            handler.push_data(self, buf);
+                            handler.push_data(self, buf[0]);
                             self.index += 1;
                         },
                     }
@@ -666,7 +693,7 @@ impl Parser {
                                 self.skip_body = handler.on_headers_complete(self);
                             }
                             c if is_token(c) => {
-                                handler.push_data(self, buf);
+                                handler.push_data(self, buf[0]);
                                 self.state = HeaderFieldStart;
                                 self.index = 1;
                             }
@@ -725,10 +752,19 @@ impl Parser {
                                         'e' if self.index == 6 => HeaderMatchingUpgrade,
                                         _ => HeaderGeneral,
                                     },
+                                    HeaderContentLength if buf[0] >= '0' as u8 && buf[0] <= '9' as u8 => {
+                                        self.content_length *= 10;
+                                        self.content_length += buf[0] as uint - '0' as uint;
+                                        HeaderContentLength
+                                    }
+                                    HeaderContentLength if buf[0] < '0' as u8 || buf[0] > '9' as u8 => {
+                                        self.content_length = UINT_MAX;
+                                        HeaderGeneral
+                                    }
                                     _ => HeaderGeneral,
                                 };
                             }
-                            handler.push_data(self, buf);
+                            handler.push_data(self, buf[0]);
                             self.index += 1;
                         }
                     }
@@ -746,28 +782,8 @@ impl Parser {
                     }
                     self.state = HeadersDone;
                 }
-                HeadersDone => {
-                    if self.skip_body {
-                        self.state = reset_state!(self.parser_type);
-                        handler.on_message_complete(self);
-                        break;
-                    }
-                    match self.content_length {
-                        0u => {
-                            self.state = reset_state!(self.parser_type);
-                            handler.on_message_complete(self);
-                            break;
-                        }
-                        UINT_MAX => {
-                            if self.parser_type == Request || !self.needs_eof() {
-                                self.state = reset_state!(self.parser_type);
-                                handler.on_message_complete(self);
-                                break;
-                            }
-                            self.state = BodyIdentityEOF;
-                        }
-                        _ => self.state = BodyIdentity,
-                    }
+                BodyIdentity => {
+                    break // unimplemented
                 }
                 Dead | Crashed => unreachable!(),
                 _ => unimplemented!()
@@ -782,7 +798,7 @@ impl Parser {
         self.http_version
     }
 
-    /// HTTP version
+    /// HTTP satus code
     pub fn get_status_code(&self) -> uint {
         self.status_code
     }
@@ -870,3 +886,5 @@ enum HeaderParseState {
     HeaderTransferEncoding,
     HeaderUpgrade,
 }
+
+#[cfg(test)] pub mod tests;

@@ -29,6 +29,4 @@ pub mod version {
     }
 }
 
-pub mod parser;
-#[cfg(test)] pub mod tests;
-#[cfg(test)] pub mod benchmarks;
+pub mod http;

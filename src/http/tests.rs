@@ -1,29 +1,38 @@
-use parser::*;
+use http::*;
+
 use std::collections::HashMap;
 use std::io::{BufReader, InvalidInput, IoResult, standard_error};
-use std::str::{SendStr, from_utf8};
+use std::str::from_utf8;
+use test::Bencher;
 
 #[test]
 fn test_no_message() {
     let data = [];
     let mut parser = Parser::new(Request);
-    let mut handler = TestHandler::new(true);
+    let mut handler = TestHandler::new();
     assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(0));
     assert!(!handler.started);
     assert!(!handler.finished);
 }
 
+#[bench]
+fn bench_no_message(b: &mut Bencher) {
+    let buf: &[u8] = [];
+    b.iter(|| Parser::new(Request).parse(&mut BufReader::new(buf), &mut BenchHandler) );
+}
+
 mod http_0_9 {
-    use super::TestHandler;
-    use parser::*;
+    use http::*;
+    use super::{BenchHandler, TestHandler};
     use std::io::BufReader;
+    use test::Bencher;
 
     #[test]
-    fn test_simple_request_get() {
+    fn test_request_get() {
         let msg = "GET /\r\n";
         let data = msg.as_bytes();
         let mut parser = Parser::new(Request);
-        let mut handler = TestHandler::new(true);
+        let mut handler = TestHandler::new();
 
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(6));
         assert!(handler.started);
@@ -34,19 +43,27 @@ mod http_0_9 {
         // Parser is dead, no more read.
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(0));
     }
+
+    #[bench]
+    fn bench_request_get(b: &mut Bencher) {
+        let msg = "GET /\r\n";
+        let data = msg.as_bytes();
+        b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut BenchHandler) );
+    }
 }
 
 mod http_1_0 {
-    use parser::*;
-    use super::{TestHandler, assert_general_headers, create_request};
+    use http::*;
+    use super::{BenchHandler, TestHandler, assert_general_headers, create_request, create_response};
     use std::io::BufReader;
+    use test::Bencher;
 
     #[test]
     fn test_request_without_header() {
         let msg = "GET / HTTP/1.0\r\n\r\n";
         let data = msg.as_bytes();
         let mut parser = Parser::new(Request);
-        let mut handler = TestHandler::new(true);
+        let mut handler = TestHandler::new();
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
         assert!(handler.started);
         assert_eq!(handler.url, Some("/".to_string()));
@@ -60,13 +77,13 @@ mod http_1_0 {
         let msg = create_request("GET", "/get", 0, None, None);
         let data = msg.as_bytes();
         let mut parser = Parser::new(Request);
-        let mut handler = TestHandler::new(true);
+        let mut handler = TestHandler::new();
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
+        assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
         assert!(!parser.should_keep_alive());
         assert!(handler.started);
-        assert_eq!(handler.url, Some("/get".to_string()));
-        assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
         assert!(handler.finished);
+        assert_eq!(handler.url, Some("/get".to_string()));
         assert_general_headers(&handler);
     }
 
@@ -75,40 +92,63 @@ mod http_1_0 {
         let msg = create_request("GET", "/keep-alive", 0, Some(vec!("Connection", "keep-alive")), None);
         let data = msg.as_bytes();
         let mut parser = Parser::new(Request);
-        let mut handler = TestHandler::new(true);
+        let mut handler = TestHandler::new();
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
         assert!(parser.should_keep_alive());
     }
 
     #[test]
     fn test_response_without_header() {
-        let msg = "HTTP/1.0 200 OK\r\n\r\n";
+        let msg = "HTTP/1.0 304 Not Modified\r\n\r\n";
         let data = msg.as_bytes();
         let mut parser = Parser::new(Response);
-        let mut handler = TestHandler::new(true);
+        let mut handler = TestHandler::new();
+        assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
+        assert!(handler.started);
+        assert!(handler.finished);
+        assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
+        assert_eq!(parser.get_status_code(), 304);
+    }
+
+    #[test]
+    fn test_response_200() {
+        let msg = create_response(0, "200 OK", Some(vec!("Content-Length", "0")), None);
+        let data = msg.as_bytes();
+        println!("{}\n{}", data.len(), msg);
+        let mut parser = Parser::new(Response);
+        let mut handler = TestHandler::new();
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
         assert!(handler.started);
         assert!(handler.finished);
         assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
         assert_eq!(parser.get_status_code(), 200);
+        println!("{}", handler.headers.find(&"Content-Length".to_string()));
+    }
+
+    #[bench]
+    fn bench_request_get(b: &mut Bencher) {
+        let msg = create_request("GET", "/path/to/some/contents", 0, None, None);
+        let data = msg.as_bytes();
+        b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut BenchHandler) );
     }
 }
 
 mod http_1_1 {
-    use parser::*;
-    use super::{TestHandler, assert_general_headers, create_request};
+    use http::*;
+    use super::{BenchHandler, TestHandler, assert_general_headers, create_request};
     use std::io::BufReader;
+    use test::Bencher;
 
     #[test]
     fn test_request_get() {
-        let msg = create_request("GET", "/tag/Rust", 1, None, None);
+        let msg = create_request("GET", "/get", 1, None, None);
         let data = msg.as_bytes();
         let mut parser = Parser::new(Request);
-        let mut handler = TestHandler::new(true);
+        let mut handler = TestHandler::new();
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
         assert!(parser.should_keep_alive());
         assert!(handler.started);
-        assert_eq!(handler.url, Some("/tag/Rust".to_string()));
+        assert_eq!(handler.url, Some("/get".to_string()));
         assert_eq!(parser.get_http_version(), Some(HTTP_1_1));
         assert!(handler.finished);
         assert_general_headers(&handler);
@@ -119,39 +159,44 @@ mod http_1_1 {
         let msg = create_request("GET", "/close", 1, Some(vec!("Connection", "close")), None);
         let data = msg.as_bytes();
         let mut parser = Parser::new(Request);
-        let mut handler = TestHandler::new(true);
+        let mut handler = TestHandler::new();
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
         assert!(!parser.should_keep_alive());
     }
 
     #[test]
     fn test_response_without_header() {
-        let msg = "HTTP/1.1 200 OK\r\n\r\n";
+        let msg = "HTTP/1.1 304 Not Modified\r\n\r\n";
         let data = msg.as_bytes();
         let mut parser = Parser::new(Response);
-        let mut handler = TestHandler::new(true);
+        let mut handler = TestHandler::new();
         assert_eq!(parser.parse(&mut BufReader::new(data), &mut handler), Ok(data.len()));
         assert!(handler.started);
         assert!(handler.finished);
         assert_eq!(parser.get_http_version(), Some(HTTP_1_1));
-        assert_eq!(parser.get_status_code(), 200);
+        assert_eq!(parser.get_status_code(), 304);
+    }
+
+    #[bench]
+    fn bench_request_get(b: &mut Bencher) {
+        let msg = create_request("GET", "/path/to/some/contents", 1, None, None);
+        let data = msg.as_bytes();
+        b.iter(|| Parser::new(Request).parse(&mut BufReader::new(data), &mut BenchHandler) );
     }
 }
 
 pub struct TestHandler {
-    skip_body: bool,
     started: bool,
     url: Option<String>,
     headers_finished: bool,
-    headers: HashMap<SendStr, SendStr>,
+    headers: HashMap<String, String>,
     finished: bool,
     buffer: Vec<u8>,
 }
 
 impl TestHandler {
-    fn new(skip_body: bool) -> TestHandler {
+    fn new() -> TestHandler {
         TestHandler {
-            skip_body: skip_body,
             started: false,
             url: None,
             headers_finished: false,
@@ -195,7 +240,7 @@ impl Handler for TestHandler {
                     None => return Err(standard_error(InvalidInput)),
                 }
             };
-            self.headers.insert(name.to_string().into_maybe_owned(), value.to_string().into_maybe_owned());
+            self.headers.insert(name.to_string(), value.to_string());
         }
         self.buffer.clear();
         Ok(())
@@ -203,16 +248,22 @@ impl Handler for TestHandler {
 
     fn on_headers_complete(&mut self, _: &Parser) -> bool {
         self.headers_finished = true;
-        self.skip_body
+        return false;
     }
 
     fn on_message_complete(&mut self, _: &Parser) {
         self.finished = true;
     }
 
-    fn push_data(&mut self, _: &Parser, byte: &[u8]) {
-        self.buffer.push_all(byte);
+    fn push_data(&mut self, _: &Parser, byte: u8) {
+        self.buffer.push(byte);
     }
+}
+
+struct BenchHandler;
+
+impl Handler for BenchHandler {
+    fn push_data(&mut self, _: &Parser, _: u8) { /* ignore */ }
 }
 
 fn general_headers() -> Vec<&'static str> {
@@ -230,14 +281,13 @@ fn assert_general_headers(handler: &TestHandler) {
     assert!(handler.headers_finished);
     for chunk in general_headers().as_slice().chunks(2) {
         let (name, value) = (chunk[0], chunk[1]);
-        println!("{}, {}", name, value);
-        assert_eq!(handler.headers.find(&name.into_maybe_owned()), Some(&value.into_maybe_owned()));
+        assert_eq!(handler.headers.find(&name.to_string()), Some(&value.to_string()));
     }
 }
 
 fn create_request(method: &'static str, url: &'static str, version: uint, header: Option<Vec<&'static str>>, body: Option<String>) -> String {
     let mut vec = Vec::new();
-    let nl = "\r\n".to_string();
+    let mbody = if body.is_some() { body.unwrap() } else { "".to_string() };
     vec.push(format!("{} {} HTTP/1.{}", method, url, version));
     for win in general_headers().as_slice().chunks(2) {
         vec.push(format!("{}: {}", win[0], win[1]));
@@ -247,10 +297,26 @@ fn create_request(method: &'static str, url: &'static str, version: uint, header
             vec.push(format!("{}: {}", win[0], win[1]));
         }
     }
-    vec.push(nl.clone());
-    if body.is_some() {
-        vec.push(body.unwrap());
-        vec.push(nl.clone());
+    if mbody.len() > 0 { vec.push(format!("Content-Length: {}", mbody.as_bytes().len())) }
+    vec.push("".to_string());
+    vec.push(mbody);
+    vec.connect( "\r\n")
+}
+
+fn create_response(version: uint, status: &'static str, header: Option<Vec<&'static str>>, body: Option<String>) -> String {
+    let mut vec = Vec::new();
+    let mbody = if body.is_some() { body.unwrap() } else { "".to_string() };
+    vec.push(format!("HTTP/1.{} {}", version, status));
+    for win in general_headers().as_slice().chunks(2) {
+        vec.push(format!("{}: {}", win[0], win[1]));
     }
-    vec.connect(nl.as_slice())
+    if header.is_some() {
+        for win in header.unwrap().as_slice().chunks(2) {
+            vec.push(format!("{}: {}", win[0], win[1]));
+        }
+    }
+    if mbody.len() > 0 { vec.push(format!("Content-Length: {}", mbody.as_bytes().len())) }
+    vec.push("".to_string());
+    vec.push(mbody);
+    vec.connect("\r\n")
 }
