@@ -1,7 +1,7 @@
 use http::*;
+use http::parser::*;
 
 use std::collections::HashMap;
-use std::io::{InvalidInput, IoResult, standard_error};
 use std::str::from_utf8;
 use test::Bencher;
 
@@ -21,6 +21,7 @@ fn bench_no_message(b: &mut Bencher) {
 
 mod http_0_9 {
     use http::*;
+    use http::parser::*;
     use super::{BenchHandler, TestHandler};
     use test::Bencher;
 
@@ -33,9 +34,10 @@ mod http_0_9 {
 
         assert_eq!(parser.parse(data, &mut handler), Ok(6));
         assert!(handler.started);
-        assert_eq!(handler.url, Some("/".to_string()));
-        assert_eq!(parser.get_http_version(), Some(HTTP_0_9));
         assert!(handler.finished);
+        assert_eq!(handler.method, Some(HttpGet));
+        assert_eq!(handler.url, Some("/".to_string()));
+        assert_eq!(handler.version, None);
 
         // Parser is dead, no more read.
         assert_eq!(parser.parse(data, &mut handler), Ok(0));
@@ -51,6 +53,7 @@ mod http_0_9 {
 
 mod http_1_0 {
     use http::*;
+    use http::parser::*;
     use super::{BenchHandler, TestHandler, assert_general_headers, create_request, create_response};
     use test::Bencher;
 
@@ -62,10 +65,11 @@ mod http_1_0 {
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
-        assert_eq!(handler.url, Some("/".to_string()));
-        assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
         assert!(handler.headers_finished);
         assert!(handler.finished);
+        assert_eq!(handler.method, Some(HttpGet));
+        assert_eq!(handler.url, Some("/".to_string()));
+        assert_eq!(handler.version, Some(HTTP_1_0));
     }
 
     #[test]
@@ -75,11 +79,12 @@ mod http_1_0 {
         let mut parser = Parser::new(Request);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
-        assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
         assert!(!parser.should_keep_alive());
         assert!(handler.started);
         assert!(handler.finished);
+        assert_eq!(handler.method, Some(HttpGet));
         assert_eq!(handler.url, Some("/get".to_string()));
+        assert_eq!(handler.version, Some(HTTP_1_0));
         assert_general_headers(&handler);
     }
 
@@ -102,8 +107,8 @@ mod http_1_0 {
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
         assert!(handler.finished);
-        assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
-        assert_eq!(parser.get_status_code(), 304);
+        assert_eq!(handler.status_code, 304);
+        assert_eq!(handler.version, Some(HTTP_1_0));
     }
 
     #[test]
@@ -115,9 +120,9 @@ mod http_1_0 {
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
         assert!(handler.finished);
-        assert_eq!(parser.get_http_version(), Some(HTTP_1_0));
-        assert_eq!(parser.get_status_code(), 200);
+        assert_eq!(handler.status_code, 200);
         assert_eq!(handler.body, Some("Hello, HTTP world!".to_string()));
+        assert_eq!(handler.version, Some(HTTP_1_0));
     }
 
     #[bench]
@@ -137,6 +142,7 @@ mod http_1_0 {
 
 mod http_1_1 {
     use http::*;
+    use http::parser::*;
     use super::{BenchHandler, TestHandler, assert_general_headers, create_request, create_response};
     use test::Bencher;
 
@@ -147,11 +153,12 @@ mod http_1_1 {
         let mut parser = Parser::new(Request);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
-        assert!(parser.should_keep_alive());
         assert!(handler.started);
-        assert_eq!(handler.url, Some("/get".to_string()));
-        assert_eq!(parser.get_http_version(), Some(HTTP_1_1));
         assert!(handler.finished);
+        assert_eq!(handler.method, Some(HttpGet));
+        assert_eq!(handler.url, Some("/get".to_string()));
+        assert_eq!(handler.version, Some(HTTP_1_1));
+        assert!(parser.should_keep_alive());
         assert_general_headers(&handler);
     }
 
@@ -174,8 +181,8 @@ mod http_1_1 {
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
         assert!(handler.finished);
-        assert_eq!(parser.get_http_version(), Some(HTTP_1_1));
-        assert_eq!(parser.get_status_code(), 304);
+        assert_eq!(handler.status_code, 304);
+        assert_eq!(handler.version, Some(HTTP_1_1));
     }
 
     #[test]
@@ -187,9 +194,9 @@ mod http_1_1 {
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
         assert!(handler.finished);
-        assert_eq!(parser.get_http_version(), Some(HTTP_1_1));
-        assert_eq!(parser.get_status_code(), 200);
+        assert_eq!(handler.status_code, 200);
         assert_eq!(handler.body, Some("Hello, HTTP world!".to_string()));
+        assert_eq!(handler.version, Some(HTTP_1_1));
     }
 
     #[bench]
@@ -209,11 +216,14 @@ mod http_1_1 {
 
 pub struct TestHandler {
     started: bool,
+    finished: bool,
+    version: Option<HttpVersion>,
+    method: Option<HttpMethod>,
     url: Option<String>,
+    status_code: uint,
     headers_finished: bool,
     headers: HashMap<String, String>,
     body: Option<String>,
-    finished: bool,
     buffer: Vec<u8>,
 }
 
@@ -221,53 +231,66 @@ impl TestHandler {
     fn new() -> TestHandler {
         TestHandler {
             started: false,
+            finished: false,
+            version: None,
+            method: None,
             url: None,
+            status_code: 0,
             headers_finished: false,
             headers: HashMap::new(),
-            finished: false,
             buffer: Vec::new(),
             body: None,
         }
     }
 }
 
-impl Handler for TestHandler {
+impl MessageHandler for TestHandler {
     fn on_message_begin(&mut self, _: &Parser) {
         self.started = true;
     }
 
-    fn on_url(&mut self, _: &Parser, length: uint) -> IoResult<()> {
+    fn on_method(&mut self, _: &Parser, method: HttpMethod) {
+        self.method = Some(method);
+    }
+
+    fn on_url(&mut self, _: &Parser, length: uint) {
         {
             self.url = match from_utf8(self.buffer.slice_to(length)) {
                 Some(url) => Some(url.to_string()),
-                None => return Err(standard_error(InvalidInput)),
+                None => None,
             };
         }
         self.buffer.clear();
-        Ok(())
     }
 
-    fn on_header_value(&mut self, _: &Parser, length: uint) -> IoResult<()> {
+    fn on_version(&mut self, _: &Parser, version: HttpVersion) {
+        self.version = Some(version);
+    }
+
+    fn on_status(&mut self, _: &Parser, status: uint) {
+        self.status_code = status;
+    }
+
+    fn on_header_value(&mut self, _: &Parser, length: uint) {
         {
             let len = self.buffer.len();
             let name = {
                 let slice = self.buffer.slice_to(len-length);
                 match from_utf8(slice) {
                     Some(s) => s.clone(),
-                    None => return Err(standard_error(InvalidInput)),
+                    None => return,
                 }
             };
             let value = {
                 let slice = self.buffer.slice_from(len-length);
                 match from_utf8(slice) {
                     Some(s) => s.clone(),
-                    None => return Err(standard_error(InvalidInput)),
+                    None => return,
                 }
             };
             self.headers.insert(name.to_string(), value.to_string());
         }
         self.buffer.clear();
-        Ok(())
     }
 
     fn on_headers_complete(&mut self, _: &Parser) -> bool {
@@ -275,7 +298,7 @@ impl Handler for TestHandler {
         return false;
     }
 
-    fn on_body(&mut self, _: &Parser, length: uint) -> IoResult<()> {
+    fn on_body(&mut self, _: &Parser, length: uint) {
         {
             let body = if length > 0 {
                 let ref st = self.buffer;
@@ -286,26 +309,21 @@ impl Handler for TestHandler {
             self.body = body;
         }
         self.buffer.clear();
-        Ok(())
     }
 
     fn on_message_complete(&mut self, _: &Parser) {
         self.finished = true;
     }
 
-    fn push_data(&mut self, _: &Parser, byte: u8) {
-        self.buffer.push(byte);
-    }
-
-    fn push_data_all(&mut self, _: &Parser, byte: &[u8]) {
+    fn write(&mut self, _: &Parser, byte: &[u8]) {
         self.buffer.push_all(byte);
     }
 }
 
 struct BenchHandler;
 
-impl Handler for BenchHandler {
-    fn push_data(&mut self, _: &Parser, _: u8) { /* ignore */ }
+impl MessageHandler for BenchHandler {
+    fn write(&mut self, _: &Parser, _: &[u8]) { /* ignore */ }
 }
 
 fn general_headers() -> Vec<&'static str> {
