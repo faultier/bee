@@ -7,7 +7,7 @@ use test::Bencher;
 
 #[test]
 fn test_no_message() {
-    let mut parser = Parser::new(Request);
+    let mut parser = Parser::new(ParseRequest);
     let mut handler = TestHandler::new();
     assert_eq!(parser.parse([], &mut handler), Ok(0));
     assert!(!handler.started);
@@ -16,7 +16,7 @@ fn test_no_message() {
 
 #[bench]
 fn bench_no_message(b: &mut Bencher) {
-    b.iter(|| Parser::new(Request).parse([], &mut BenchHandler) );
+    b.iter(|| Parser::new(ParseRequest).parse([], &mut BenchHandler) );
 }
 
 mod http_0_9 {
@@ -29,7 +29,7 @@ mod http_0_9 {
     fn test_request_get() {
         let msg = "GET /\r\n";
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Request);
+        let mut parser = Parser::new(ParseRequest);
         let mut handler = TestHandler::new();
 
         assert_eq!(parser.parse(data, &mut handler), Ok(6));
@@ -47,7 +47,7 @@ mod http_0_9 {
     fn bench_request_get(b: &mut Bencher) {
         let msg = "GET /\r\n";
         let data = msg.as_bytes();
-        b.iter(|| Parser::new(Request).parse(data, &mut BenchHandler) );
+        b.iter(|| Parser::new(ParseRequest).parse(data, &mut BenchHandler) );
     }
 }
 
@@ -61,7 +61,7 @@ mod http_1_0 {
     fn test_request_without_header() {
         let msg = "GET / HTTP/1.0\r\n\r\n";
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Request);
+        let mut parser = Parser::new(ParseRequest);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
@@ -76,7 +76,7 @@ mod http_1_0 {
     fn test_request_get() {
         let msg = create_request("GET", "/get", 0, None, None);
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Request);
+        let mut parser = Parser::new(ParseRequest);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(!parser.should_keep_alive());
@@ -92,7 +92,7 @@ mod http_1_0 {
     fn test_request_keep_alive() {
         let msg = create_request("GET", "/keep-alive", 0, Some(vec!("Connection", "keep-alive")), None);
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Request);
+        let mut parser = Parser::new(ParseRequest);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(parser.should_keep_alive());
@@ -102,7 +102,7 @@ mod http_1_0 {
     fn test_response_without_header() {
         let msg = "HTTP/1.0 304 Not Modified\r\n\r\n";
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Response);
+        let mut parser = Parser::new(ParseResponse);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
@@ -112,10 +112,10 @@ mod http_1_0 {
     }
 
     #[test]
-    fn test_response_200() {
+    fn test_response() {
         let msg = create_response(0, "200 OK", Some(vec!("Content-Type", "text/plain")), Some("Hello, HTTP world!"));
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Response);
+        let mut parser = Parser::new(ParseResponse);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
@@ -129,14 +129,14 @@ mod http_1_0 {
     fn bench_request_get(b: &mut Bencher) {
         let msg = create_request("GET", "/path/to/some/contents", 0, None, None);
         let data = msg.as_bytes();
-        b.iter(|| Parser::new(Request).parse(data, &mut BenchHandler) );
+        b.iter(|| Parser::new(ParseRequest).parse(data, &mut BenchHandler) );
     }
 
     #[bench]
-    fn bench_response_200(b: &mut Bencher) {
+    fn bench_response(b: &mut Bencher) {
         let msg = create_response(0, "200 OK", Some(vec!("Content-Type", "text/plain")), Some("Hello, HTTP world!"));
         let data = msg.as_bytes();
-        b.iter(|| Parser::new(Response).parse(data, &mut BenchHandler) );
+        b.iter(|| Parser::new(ParseResponse).parse(data, &mut BenchHandler) );
     }
 }
 
@@ -150,7 +150,7 @@ mod http_1_1 {
     fn test_request_get() {
         let msg = create_request("GET", "/get", 1, None, None);
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Request);
+        let mut parser = Parser::new(ParseRequest);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
@@ -166,7 +166,7 @@ mod http_1_1 {
     fn test_request_close() {
         let msg = create_request("GET", "/close", 1, Some(vec!("Connection", "close")), None);
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Request);
+        let mut parser = Parser::new(ParseRequest);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(!parser.should_keep_alive());
@@ -176,7 +176,7 @@ mod http_1_1 {
     fn test_response_without_header() {
         let msg = "HTTP/1.1 304 Not Modified\r\n\r\n";
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Response);
+        let mut parser = Parser::new(ParseResponse);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
@@ -186,10 +186,10 @@ mod http_1_1 {
     }
 
     #[test]
-    fn test_response_200() {
+    fn test_response() {
         let msg = create_response(1, "200 OK", Some(vec!("Content-Type", "text/plain")), Some("Hello, HTTP world!"));
         let data = msg.as_bytes();
-        let mut parser = Parser::new(Response);
+        let mut parser = Parser::new(ParseResponse);
         let mut handler = TestHandler::new();
         assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
         assert!(handler.started);
@@ -199,18 +199,44 @@ mod http_1_1 {
         assert_eq!(handler.version, Some(HTTP_1_1));
     }
 
+    #[test]
+    fn test_response_chunked() {
+        let msg = create_response(1, "200 OK",
+                                  Some(vec!("Content-Type", "text/plain", "Transfer-Encoding", "chunked")),
+                                  Some("10\r\nHello, HTTP worl\r\n2;chunk-ext-name\r\nd!\r\n0\r\n"));
+        let data = msg.as_bytes();
+        let mut parser = Parser::new(ParseResponse);
+        let mut handler = TestHandler::new();
+        assert_eq!(parser.parse(data, &mut handler), Ok(data.len()));
+        assert!(handler.started);
+        assert!(handler.finished);
+        assert_eq!(handler.status_code, 200);
+        assert_eq!(handler.body, Some("Hello, HTTP world!".to_string()));
+        assert_eq!(handler.version, Some(HTTP_1_1));
+    }
+
+
     #[bench]
     fn bench_request_get(b: &mut Bencher) {
         let msg = create_request("GET", "/path/to/some/contents", 1, None, None);
         let data = msg.as_bytes();
-        b.iter(|| Parser::new(Request).parse(data, &mut BenchHandler) );
+        b.iter(|| Parser::new(ParseRequest).parse(data, &mut BenchHandler) );
     }
 
     #[bench]
-    fn bench_response_200(b: &mut Bencher) {
+    fn bench_response(b: &mut Bencher) {
         let msg = create_response(1, "200 OK", Some(vec!("Content-Type", "text/plain")), Some("Hello, HTTP world!"));
         let data = msg.as_bytes();
-        b.iter(|| Parser::new(Response).parse(data, &mut BenchHandler) );
+        b.iter(|| Parser::new(ParseResponse).parse(data, &mut BenchHandler) );
+    }
+
+    #[bench]
+    fn bench_response_chunked(b: &mut Bencher) {
+        let msg = create_response(1, "200 OK",
+                                  Some(vec!("Content-Type", "text/plain", "Transfer-Encoding", "chunked")),
+                                  Some("10\r\nHello, HTTP worl\r\n2;chunk-ext-name\r\nd!\r\n0\r\n"));
+        let data = msg.as_bytes();
+        b.iter(|| Parser::new(ParseResponse).parse(data, &mut BenchHandler) );
     }
 }
 
@@ -311,7 +337,10 @@ impl MessageHandler for TestHandler {
         self.buffer.clear();
     }
 
-    fn on_message_complete(&mut self, _: &Parser) {
+    fn on_message_complete(&mut self, parser: &Parser) {
+        if parser.chunked() {
+            self.on_body(parser, ::std::uint::MAX);
+        }
         self.finished = true;
     }
 

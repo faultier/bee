@@ -9,13 +9,13 @@ use http;
 
 #[deriving(PartialEq, Eq, Clone, Show)]
 /// A parser types.
-pub enum Type {
-    /// Parse request.
-    Request,
-    /// Parse response.
-    Response,
+pub enum ParseType {
+    /// Parse request only.
+    ParseRequest,
+    /// Parse response only.
+    ParseResponse,
     /// Parse request or response.
-    Both,
+    ParseBoth,
 }
 
 static CR: char = '\r';
@@ -110,6 +110,8 @@ pub enum ParseError {
     InvalidHeaderField,
     /// Invalid header section.
     InvalidHeaders,
+    /// Invalid chunk data.
+    InvalidChunk,
     /// Expected data, but reached EOF.
     InvalidEOFState,
 }
@@ -119,7 +121,7 @@ pub type ParseResult = Result<uint, ParseError>;
 /// HTTP parser.
 pub struct Parser {
     // parser internal state
-    parser_type: Type,
+    parser_type: ParseType,
     state: ParserState,
     hstate: HeaderState,
     index: uint,
@@ -134,6 +136,7 @@ pub struct Parser {
     message_body_rest: uint,
     upgrade: bool,
     keep_alive: bool,
+    chunked: bool,
 
     // request
     method: Option<http::HttpMethod>,
@@ -144,14 +147,14 @@ pub struct Parser {
 
 impl Parser {
     /// Create a new `Parser`.
-    pub fn new(t: Type) -> Parser {
+    pub fn new(t: ParseType) -> Parser {
         Parser {
             parser_type: t,
             http_version: None,
             state: match t {
-                Request  => StartReq,
-                Response => StartRes,
-                Both     => StartReqOrRes,
+                ParseRequest  => StartReq,
+                ParseResponse => StartRes,
+                ParseBoth     => StartReqOrRes,
             },
             hstate: HeaderGeneral,
             method: None,
@@ -163,6 +166,7 @@ impl Parser {
             minor: 0,
             keep_alive: false,
             upgrade: false,
+            chunked: false,
         }
     }
 
@@ -175,7 +179,11 @@ impl Parser {
 
         let mut read = 0u;
 
-        if !(self.state == BodyIdentity || self.state == BodyIdentityEOF) {
+        if !(self.state == BodyIdentity
+             || self.state == BodyIdentityEOF
+             || self.state == ChunkSize
+             || self.state == ChunkSizeAlmostDone
+             || self.state == ChunkData) {
             for &byte in data.iter() {
                 read += 1;
                 match self.state {
@@ -438,7 +446,7 @@ impl Parser {
                                             handler.on_message_complete(self);
                                             self.reset();
                                         }
-                                        UINT_MAX => if self.parser_type == Request || !self.needs_eof() {
+                                        UINT_MAX => if self.parser_type == ParseRequest || !self.needs_eof() {
                                             handler.on_message_complete(self);
                                             self.reset();
                                         } else {
@@ -509,6 +517,25 @@ impl Parser {
                                             'h' if self.index == 13 => HeaderContentLength,
                                             _ => HeaderGeneral,
                                         },
+                                        HeaderTransferEncoding => match to_lowercase(c) {
+                                            'r' if self.index == 1  => HeaderTransferEncoding,
+                                            'a' if self.index == 2  => HeaderTransferEncoding,
+                                            'n' if self.index == 3  => HeaderTransferEncoding,
+                                            's' if self.index == 4  => HeaderTransferEncoding,
+                                            'f' if self.index == 5  => HeaderTransferEncoding,
+                                            'e' if self.index == 6  => HeaderTransferEncoding,
+                                            'r' if self.index == 7  => HeaderTransferEncoding,
+                                            '-' if self.index == 8  => HeaderTransferEncoding,
+                                            'e' if self.index == 9  => HeaderTransferEncoding,
+                                            'n' if self.index == 10 => HeaderTransferEncoding,
+                                            'c' if self.index == 11 => HeaderTransferEncoding,
+                                            'o' if self.index == 12 => HeaderTransferEncoding,
+                                            'd' if self.index == 13 => HeaderTransferEncoding,
+                                            'i' if self.index == 14 => HeaderTransferEncoding,
+                                            'n' if self.index == 15 => HeaderTransferEncoding,
+                                            'g' if self.index == 16 => HeaderTransferEncoding,
+                                            _ => HeaderGeneral,
+                                        },
                                         _ => HeaderGeneral,
                                     };
                                 }
@@ -525,9 +552,10 @@ impl Parser {
                             _ => {
                                 let c = to_lowercase(byte as char);
                                 self.hstate = match self.hstate {
-                                    HeaderConnection if c == 'k' => HeaderMatchingKeepAlive,
                                     HeaderConnection if c == 'c' => HeaderMatchingClose,
+                                    HeaderConnection if c == 'k' => HeaderMatchingKeepAlive,
                                     HeaderConnection if c == 'u' => HeaderMatchingUpgrade,
+                                    HeaderTransferEncoding if c == 'c' => HeaderMatchingChunked,
                                     HeaderContentLength => {
                                         self.message_body_rest = byte as uint - '0' as uint;
                                         HeaderContentLength
@@ -553,16 +581,19 @@ impl Parser {
                             match byte as char {
                                 CR => self.state = HeadersAlmostDone,
                                 LF => {
-                                    if handler.on_headers_complete(self) || self.skip_body {
+                                    if handler.on_headers_complete(self) || self.upgrade || self.skip_body {
                                         handler.on_message_complete(self);
                                         self.reset();
+                                    } else if self.chunked {
+                                        self.state = ChunkSize;
+                                        self.message_body_rest = 0;
                                     } else {
                                         match self.message_body_rest {
                                             0u => {
                                                 handler.on_message_complete(self);
                                                 self.reset();
                                             }
-                                            UINT_MAX => if self.parser_type == Request || !self.needs_eof() {
+                                            UINT_MAX => if self.parser_type == ParseRequest || !self.needs_eof() {
                                                 handler.on_message_complete(self);
                                                 self.reset();
                                             } else {
@@ -590,8 +621,9 @@ impl Parser {
                                     HeaderFieldStart
                                 };
                                 match self.hstate {
-                                    HeaderMatchingKeepAlive if self.index == 10 => self.keep_alive = true,
+                                    HeaderMatchingChunked   if self.index == 7  => self.chunked = true,
                                     HeaderMatchingClose     if self.index == 5  => self.keep_alive = false,
+                                    HeaderMatchingKeepAlive if self.index == 10 => self.keep_alive = true,
                                     HeaderMatchingUpgrade   if self.index == 6  => self.upgrade = true,
                                     _ => (),
                                 }
@@ -622,6 +654,15 @@ impl Parser {
                                             'o' if self.index == 2 => HeaderMatchingClose,
                                             's' if self.index == 3 => HeaderMatchingClose,
                                             'e' if self.index == 4 => HeaderMatchingClose,
+                                            _ => HeaderGeneral,
+                                        },
+                                        HeaderMatchingChunked => match c {
+                                            'h' if self.index == 1 => HeaderMatchingChunked,
+                                            'u' if self.index == 2 => HeaderMatchingChunked,
+                                            'n' if self.index == 3 => HeaderMatchingChunked,
+                                            'k' if self.index == 4 => HeaderMatchingChunked,
+                                            'e' if self.index == 5 => HeaderMatchingChunked,
+                                            'd' if self.index == 6 => HeaderMatchingChunked,
                                             _ => HeaderGeneral,
                                         },
                                         HeaderMatchingUpgrade => match c {
@@ -655,16 +696,19 @@ impl Parser {
                     }
                     HeadersAlmostDone => {
                         if byte as char != LF { self.state = Crashed; return Err(InvalidHeaders) }
-                        if handler.on_headers_complete(self) || self.skip_body {
+                        if handler.on_headers_complete(self) || self.upgrade || self.skip_body {
                             handler.on_message_complete(self);
                             self.reset();
+                        } else if self.chunked {
+                            self.state = ChunkSize;
+                            self.message_body_rest = 0;
                         } else {
                             match self.message_body_rest {
                                 0u => {
                                     handler.on_message_complete(self);
                                     self.reset();
                                 }
-                                UINT_MAX => if self.parser_type == Request || !self.needs_eof() {
+                                UINT_MAX => if self.parser_type == ParseRequest || !self.needs_eof() {
                                     handler.on_message_complete(self);
                                     self.reset();
                                 } else {
@@ -673,10 +717,72 @@ impl Parser {
                                 _ => self.state = BodyIdentity,
                             }
                         }
+
                         break
                     }
                     BodyIdentity | BodyIdentityEOF | Dead | Crashed => unreachable!(),
                     _ => unimplemented!()
+                }
+            }
+        }
+
+        if self.chunked {
+            'chunk: loop {
+                if self.state == ChunkData {
+                    let rest = data.len() - read;
+                    if self.message_body_rest == 0 && rest > 2 {
+                        if data[read] as char != CR || data[read+1] as char != LF {
+                            self.state = Crashed;
+                            return Err(InvalidChunk);
+                        }
+                        read += 2;
+                        self.state = ChunkSize;
+                    } else if rest >= self.message_body_rest {
+                        handler.write(self, data.slice(read, read + self.message_body_rest));
+                        read += self.message_body_rest;
+                        self.message_body_rest = 0;
+                        if data.len() - read < 2 { break 'chunk }
+                        read += 2;
+                        self.state = ChunkSize;
+                    } else {
+                        handler.write(self, data.slice_from(read));
+                        read += rest;
+                        self.message_body_rest -= rest;
+                        break 'chunk;
+                    }
+                } else {
+                    'chunksize: for &byte in data.slice_from(read).iter() {
+                        read += 1;
+                        match self.state {
+                            ChunkExtension if byte as char == CR => {
+                                self.state = ChunkSizeAlmostDone;
+                            }
+                            ChunkExtension => { /* ignore */ }
+                            ChunkSize if byte as char == ';' => {
+                                self.state = ChunkExtension;
+                            }
+                            ChunkSize if byte as char == CR => {
+                                self.state = ChunkSizeAlmostDone;
+                            }
+                            ChunkSize => {
+                                let val = unhex(byte);
+                                if val > 15 { self.state = Crashed; return Err(InvalidChunk) }
+                                self.message_body_rest *= 16;
+                                self.message_body_rest += val;
+                            }
+                            ChunkSizeAlmostDone => {
+                                if byte as char != LF { self.state = Crashed; return Err(InvalidChunk) }
+                                if self.message_body_rest == 0 {
+                                    handler.on_message_complete(self);
+                                    break 'chunk;
+                                } else {
+                                    self.state = ChunkData;
+                                    break 'chunksize;
+                                }
+                            }
+                            _ => unreachable!()
+                        }
+                    }
                 }
             }
         }
@@ -716,11 +822,17 @@ impl Parser {
         self.upgrade
     }
 
+    /// Connection: upgrade
+    pub fn chunked(&self) -> bool {
+        self.chunked
+    }
+
+    #[inline]
     fn reset(&mut self) {
         self.state = match self.parser_type {
-            Request  => StartReq,
-            Response => StartRes,
-            Both     => StartReqOrRes,
+            ParseRequest  => StartReq,
+            ParseResponse => StartRes,
+            ParseBoth     => StartReqOrRes,
         };
         self.index = 0;
         self.major = 0;
@@ -730,8 +842,9 @@ impl Parser {
         self.status_code = 0;
     }
 
+    #[inline]
     fn needs_eof(&mut self) -> bool {
-        if self.parser_type == Request {
+        if self.parser_type == ParseRequest {
             return false;
         }
         if self.status_code / 100 == 1 ||     // 1xx e.g. Continue
@@ -756,6 +869,29 @@ fn is_token(c: char) -> bool {
         || c == '!'
         || c == '|'
         || c == '~'
+}
+
+#[inline]
+fn unhex(b: u8) -> uint {
+    match to_lowercase(b as char) {
+        '0' => 0,
+        '1' => 1,
+        '2' => 2,
+        '3' => 3,
+        '4' => 4,
+        '5' => 5,
+        '6' => 6,
+        '7' => 7,
+        '8' => 8,
+        '9' => 9,
+        'a' => 10,
+        'b' => 11,
+        'c' => 12,
+        'd' => 13,
+        'e' => 14,
+        'f' => 15,
+        _   => UINT_MAX,
+    }
 }
 
 #[deriving(PartialEq, Eq, Clone, Show)]
@@ -788,17 +924,22 @@ enum ParserState {
     HeadersAlmostDone,
     BodyIdentity,
     BodyIdentityEOF,
+    ChunkSize,
+    ChunkSizeAlmostDone,
+    ChunkExtension,
+    ChunkData,
     Crashed,
 }
 
 #[deriving(PartialEq, Eq, Clone, Show)]
 enum HeaderState {
     HeaderGeneral,
-    HeaderContentLength,
     HeaderConnection,
-    HeaderMatchingKeepAlive,
-    HeaderMatchingClose,
-    HeaderMatchingUpgrade,
+    HeaderContentLength,
     HeaderTransferEncoding,
     HeaderUpgrade,
+    HeaderMatchingChunked,
+    HeaderMatchingClose,
+    HeaderMatchingKeepAlive,
+    HeaderMatchingUpgrade,
 }
