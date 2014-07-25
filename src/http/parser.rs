@@ -118,6 +118,7 @@ pub struct Parser {
     parser_type: ParseType,
     state: ParserState,
     hstate: HeaderState,
+    cstate: ChunkState,
     index: uint,
     skip_body: bool,
 
@@ -150,6 +151,7 @@ impl Parser {
                 ParseResponse => StartRes,
             },
             hstate: HeaderGeneral,
+            cstate: ChunkSize,
             method: None,
             status_code: 0,
             message_body_rest: UINT_MAX,
@@ -172,11 +174,7 @@ impl Parser {
 
         let mut read = 0u;
 
-        if !(self.state == BodyIdentity
-             || self.state == BodyIdentityEOF
-             || self.state == ChunkSize
-             || self.state == ChunkSizeAlmostDone
-             || self.state == ChunkData) {
+        if !self.state.is_body() {
             for &byte in data.iter() {
                 read += 1;
                 match self.state {
@@ -517,7 +515,8 @@ impl Parser {
                                         handler.on_message_complete(self);
                                         self.reset();
                                     } else if self.chunked {
-                                        self.state = ChunkSize;
+                                        self.state = BodyChunk;
+                                        self.cstate = ChunkSize;
                                         self.message_body_rest = 0;
                                     } else {
                                         match self.message_body_rest {
@@ -631,7 +630,8 @@ impl Parser {
                             handler.on_message_complete(self);
                             self.reset();
                         } else if self.chunked {
-                            self.state = ChunkSize;
+                            self.state = BodyChunk;
+                            self.cstate = ChunkSize;
                             self.message_body_rest = 0;
                         } else {
                             match self.message_body_rest {
@@ -648,73 +648,9 @@ impl Parser {
                                 _ => self.state = BodyIdentity,
                             }
                         }
-
                         break
                     }
-                    BodyIdentity | BodyIdentityEOF
-                        | ChunkSize | ChunkSizeAlmostDone | ChunkExtension | ChunkData
-                        | Dead | Crashed => unreachable!(),
-                }
-            }
-        }
-
-        if self.chunked {
-            'chunk: loop {
-                if self.state == ChunkData {
-                    let rest = data.len() - read;
-                    if self.message_body_rest == 0 && rest > 2 {
-                        if data[read] != CR || data[read+1] != LF {
-                            self.state = Crashed;
-                            return Err(InvalidChunk);
-                        }
-                        read += 2;
-                        self.state = ChunkSize;
-                    } else if rest >= self.message_body_rest {
-                        handler.write(self, data.slice(read, read + self.message_body_rest));
-                        read += self.message_body_rest;
-                        self.message_body_rest = 0;
-                        if data.len() - read < 2 { break 'chunk }
-                        read += 2;
-                        self.state = ChunkSize;
-                    } else {
-                        handler.write(self, data.slice_from(read));
-                        read += rest;
-                        self.message_body_rest -= rest;
-                        break 'chunk;
-                    }
-                } else {
-                    'chunksize: for &byte in data.slice_from(read).iter() {
-                        read += 1;
-                        match (self.state, byte) {
-                            (ChunkExtension, CR) => {
-                                self.state = ChunkSizeAlmostDone;
-                            }
-                            (ChunkExtension, _) => { /* ignore */ }
-                            (ChunkSize, SEMICOLON) => {
-                                self.state = ChunkExtension;
-                            }
-                            (ChunkSize, CR) => {
-                                self.state = ChunkSizeAlmostDone;
-                            }
-                            (ChunkSize, _) => {
-                                let val = unhex(byte);
-                                if val > 15 { self.state = Crashed; return Err(InvalidChunk) }
-                                self.message_body_rest *= 16;
-                                self.message_body_rest += val;
-                            }
-                            (ChunkSizeAlmostDone, _) => {
-                                if byte != LF { self.state = Crashed; return Err(InvalidChunk) }
-                                if self.message_body_rest == 0 {
-                                    handler.on_message_complete(self);
-                                    break 'chunk;
-                                } else {
-                                    self.state = ChunkData;
-                                    break 'chunksize;
-                                }
-                            }
-                            _ => unreachable!()
-                        }
-                    }
+                    BodyIdentity | BodyIdentityEOF | BodyChunk | Dead | Crashed => unreachable!(),
                 }
             }
         }
@@ -736,6 +672,66 @@ impl Parser {
             }
             BodyIdentityEOF if data.len() != read => {
                 handler.write(self, data.slice_from(read));
+            }
+            BodyChunk => {
+                'chunk: loop {
+                    if self.cstate == ChunkData {
+                        let rest = data.len() - read;
+                        if self.message_body_rest == 0 && rest > 2 {
+                            if data[read] != CR || data[read+1] != LF {
+                                self.state = Crashed;
+                                return Err(InvalidChunk);
+                            }
+                            read += 2;
+                            self.cstate = ChunkSize;
+                        } else if rest >= self.message_body_rest {
+                            handler.write(self, data.slice(read, read + self.message_body_rest));
+                            read += self.message_body_rest;
+                            self.message_body_rest = 0;
+                            if data.len() - read < 2 { break 'chunk }
+                            read += 2;
+                            self.cstate = ChunkSize;
+                        } else {
+                            handler.write(self, data.slice_from(read));
+                            read += rest;
+                            self.message_body_rest -= rest;
+                            break 'chunk;
+                        }
+                    } else {
+                        'chunksize: for &byte in data.slice_from(read).iter() {
+                            read += 1;
+                            match (self.cstate, byte) {
+                                (ChunkExtension, CR) => {
+                                    self.cstate = ChunkSizeAlmostDone;
+                                }
+                                (ChunkExtension, _) => { /* ignore */ }
+                                (ChunkSize, SEMICOLON) => {
+                                    self.cstate = ChunkExtension;
+                                }
+                                (ChunkSize, CR) => {
+                                    self.cstate = ChunkSizeAlmostDone;
+                                }
+                                (ChunkSize, _) => {
+                                    let val = unhex(byte);
+                                    if val > 15 { self.state = Crashed; return Err(InvalidChunk) }
+                                    self.message_body_rest *= 16;
+                                    self.message_body_rest += val;
+                                }
+                                (ChunkSizeAlmostDone, _) => {
+                                    if byte != LF { self.state = Crashed; return Err(InvalidChunk) }
+                                    if self.message_body_rest == 0 {
+                                        handler.on_message_complete(self);
+                                        break 'chunk;
+                                    } else {
+                                        self.cstate = ChunkData;
+                                        break 'chunksize;
+                                    }
+                                }
+                                _ => unreachable!()
+                            }
+                        }
+                    }
+                }
             }
             ReqUrl | HeaderField | HeaderValue => {
                 let start = if read > self.index { read - self.index } else { 0 };
@@ -869,12 +865,19 @@ enum ParserState {
     HeadersAlmostDone,
     BodyIdentity,
     BodyIdentityEOF,
-    ChunkSize,
-    ChunkSizeAlmostDone,
-    ChunkExtension,
-    ChunkData,
+    BodyChunk,
     Dead,
     Crashed,
+}
+
+impl ParserState {
+    #[inline]
+    fn is_body(&self) -> bool {
+        match *self {
+            BodyIdentity | BodyIdentityEOF | BodyChunk => true,
+            _ => false,
+        }
+    }
 }
 
 #[deriving(PartialEq, Eq, Clone, Show)]
@@ -888,4 +891,12 @@ enum HeaderState {
     HeaderMatchingClose,
     HeaderMatchingKeepAlive,
     HeaderMatchingUpgrade,
+}
+
+#[deriving(PartialEq, Eq, Clone, Show)]
+enum ChunkState {
+    ChunkSize,
+    ChunkSizeAlmostDone,
+    ChunkExtension,
+    ChunkData,
 }
