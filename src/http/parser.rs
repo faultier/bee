@@ -1,4 +1,4 @@
-//! HTTP parser.
+//! HTTP request/response parser.
 
 #![experimental]
 
@@ -18,50 +18,45 @@ pub enum ParseType {
 /// Parser event handler.
 pub trait MessageHandler {
     #[allow(unused_variable)]
+    #[stable]
     /// Called when start to parsing of message.
-    /// Default implementation is nothing to do.
     fn on_message_begin(&mut self, parser: &Parser) {
     }
 
     #[allow(unused_variable)]
     /// Called when request method parsed.
-    /// Default implementation is nothing to do.
     fn on_method(&mut self, parser: &Parser, method: http::HttpMethod) {
     }
 
     #[allow(unused_variable)]
     /// Called when url parsed.
-    /// Default implementation is nothing to do.
     fn on_url(&mut self, parser: &Parser, length: uint) {
     }
 
     #[allow(unused_variable)]
+    #[stable]
     /// Called when HTTP version parsed.
-    /// Default implementation is nothing to do.
     fn on_version(&mut self, parser: &Parser, version: http::HttpVersion) {
     }
 
     #[allow(unused_variable)]
     /// Called when request method parsed.
-    /// Default implementation is nothing to do.
     fn on_status(&mut self, parser: &Parser, status: uint) {
     }
 
     #[allow(unused_variable)]
     /// Called when header field's name parsed.
-    /// Default implementation is nothing to do.
     fn on_header_field(&mut self, parser: &Parser, length: uint) {
     }
 
     #[allow(unused_variable)]
     /// Called when header field's value parsed.
-    /// Default implementation is nothing to do.
     fn on_header_value(&mut self, parser: &Parser, length: uint) {
     }
 
     #[allow(unused_variable)]
     /// Called when completed to parsing of headers.
-    /// Default implementation is nothing to do.
+    ///
     /// If returned true, skip parsing message body.
     fn on_headers_complete(&mut self, parser: &Parser) -> bool {
         return false;
@@ -69,13 +64,12 @@ pub trait MessageHandler {
 
     #[allow(unused_variable)]
     /// Called when body parsed.
-    /// Default implementation is nothing to do.
     fn on_body(&mut self, parser: &Parser, length: uint) {
     }
 
     #[allow(unused_variable)]
+    #[stable]
     /// Called when completed to parsing of whole message.
-    /// Default implementation is nothing to do.
     fn on_message_complete(&mut self, parser: &Parser) {
     }
 
@@ -106,13 +100,11 @@ pub enum ParseError {
     InvalidHeaders,
     /// Invalid chunk data.
     InvalidChunk,
-    /// Expected data, but reached EOF.
-    InvalidEOFState,
 }
 
 pub type ParseResult = Result<uint, ParseError>;
 
-/// HTTP parser.
+/// HTTP request/response parser.
 pub struct Parser {
     // parser internal state
     parser_type: ParseType,
@@ -166,9 +158,12 @@ impl Parser {
     }
 
     #[allow(unused_must_use)]
-    /// Parse HTTP message.
+    #[unstable]
+    /// Parse HTTP message, and returns parsed bytes length.
+    ///
+    /// - If find `Connection: upgrade`, skip parsing message body.
+    /// - If find `Transfer-Encoding: chunked`, decode message body.
     pub fn parse<C: MessageHandler>(&mut self, data: &[u8], handler: &mut C) -> ParseResult {
-        if self.state == Dead { return Ok(0) }
         if self.state == Crashed { return Err(OtherParseError) }
         if data.len() == 0 { return Ok(0) }
 
@@ -259,9 +254,8 @@ impl Parser {
                                 let end = read - 1;
                                 handler.write(self, data.slice(start, end));
                                 handler.on_url(self, self.index);
-                                self.state = Dead;
-                                self.index = 0;
                                 handler.on_message_complete(self);
+                                self.reset();
                                 break;
                             }
                             _ => {
@@ -650,7 +644,7 @@ impl Parser {
                         }
                         break
                     }
-                    BodyIdentity | BodyIdentityEOF | BodyChunk | Dead | Crashed => unreachable!(),
+                    BodyIdentity | BodyIdentityEOF | BodyChunk | Crashed => unreachable!(),
                 }
             }
         }
@@ -743,16 +737,19 @@ impl Parser {
         return Ok(read);
     }
 
+    #[inline]
     /// Connection: keep-alive or Connection: close
     pub fn should_keep_alive(&self) -> bool {
         self.keep_alive
     }
 
+    #[inline]
     /// Connection: upgrade
     pub fn should_upgrade(&self) -> bool {
         self.upgrade
     }
 
+    #[inline]
     /// Transfer-Encoding: chunked
     pub fn chunked(&self) -> bool {
         self.chunked
@@ -866,7 +863,6 @@ enum ParserState {
     BodyIdentity,
     BodyIdentityEOF,
     BodyChunk,
-    Dead,
     Crashed,
 }
 

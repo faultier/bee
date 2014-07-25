@@ -38,9 +38,6 @@ mod http_0_9 {
         assert_eq!(handler.method, Some(HttpGet));
         assert_eq!(handler.url, Some("/".to_string()));
         assert_eq!(handler.version, None);
-
-        // Parser is dead, no more read.
-        assert_eq!(parser.parse(data, &mut handler), Ok(0));
     }
 
     #[bench]
@@ -280,12 +277,10 @@ impl MessageHandler for TestHandler {
     }
 
     fn on_url(&mut self, _: &Parser, length: uint) {
-        {
-            self.url = match from_utf8(self.buffer.slice_to(length)) {
-                Some(url) => Some(url.to_string()),
-                None => None,
-            };
-        }
+        self.url = match from_utf8(self.buffer.slice_to(length)) {
+            Some(url) => Some(url.to_string()),
+            None => None,
+        };
         self.buffer.clear();
     }
 

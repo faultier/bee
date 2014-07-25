@@ -1,6 +1,11 @@
-//! HTTP parser.
+//! Utilities to parse HTTP messages.
 
 #![experimental]
+
+pub use self::parser::Parser;
+pub use self::parser::ParseType;
+pub use self::parser::ParseError;
+pub use self::parser::MessageHandler;
 
 use std::fmt::{Formatter, FormatError, Show};
 
@@ -43,6 +48,7 @@ impl Show for HttpVersion {
 
 #[allow(missing_doc)]
 #[deriving(PartialEq, Eq, Clone)]
+/// A list HTTP request methods.
 pub enum HttpMethod {
     HttpCheckout,
     HttpConnect,
@@ -75,9 +81,10 @@ pub enum HttpMethod {
     HttpUnsubscribe,
 }
 
+#[allow(missing_doc)]
 impl HttpMethod {
     #[inline]
-    fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match *self {
             HttpCheckout    => "CHECKOUT",
             HttpConnect     => "CONNECT",
@@ -112,7 +119,7 @@ impl HttpMethod {
     }
 
     #[inline]
-    fn hit(&self, pos: uint, c: char) -> bool {
+    pub fn hit(&self, pos: uint, c: char) -> bool {
         self.name().char_at(pos) == c
     }
 }
