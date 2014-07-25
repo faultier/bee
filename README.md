@@ -1,6 +1,6 @@
 Bee HTTP Parser
 ========
-[![Build Status](https://travis-ci.org/faultier/bee.svg?branch=master)](https://travis-ci.org/faultier/bee)
+[![Build Status](https://travis-ci.org/faultier/bee.svg?branch=develop)](https://travis-ci.org/faultier/bee)
 
 This is a parser for HTTP messages written in Rust. It parses both requests and responses,
 extracts the following information from HTTP message.
