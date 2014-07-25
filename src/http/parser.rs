@@ -2,7 +2,6 @@
 
 #![experimental]
 
-use std::char::to_lowercase;
 use UINT_MAX = std::uint::MAX;
 
 use http;
@@ -14,12 +13,7 @@ pub enum ParseType {
     ParseRequest,
     /// Parse response only.
     ParseResponse,
-    /// Parse request or response.
-    ParseBoth,
 }
-
-static CR: char = '\r';
-static LF: char = '\n';
 
 /// Parser event handler.
 pub trait MessageHandler {
@@ -154,7 +148,6 @@ impl Parser {
             state: match t {
                 ParseRequest  => StartReq,
                 ParseResponse => StartRes,
-                ParseBoth     => StartReqOrRes,
             },
             hstate: HeaderGeneral,
             method: None,
@@ -188,20 +181,20 @@ impl Parser {
                 read += 1;
                 match self.state {
                     StartReq => {
-                        self.method = Some(match byte as char {
-                            'C' => http::HttpConnect,     // or CHECKOUT, COPY
-                            'D' => http::HttpDelete,
-                            'G' => http::HttpGet,
-                            'H' => http::HttpHead,
-                            'L' => http::HttpLink,        // or LOCK
-                            'M' => http::HttpMkCol,       // or M-SEARCH, MERGE, MKACTIVITY, MKCALENDER
-                            'N' => http::HttpNotify,
-                            'O' => http::HttpOptions,
-                            'P' => http::HttpPut,         // or PATCH, POST, PROPPATCH, PROPFIND
-                            'R' => http::HttpReport,
-                            'S' => http::HttpSearch,      // or SUBSCRIBE
-                            'T' => http::HttpTrace,
-                            'U' => http::HttpUnlink,      // or UNLOCK, UNSUBSCRIBE
+                        self.method = Some(match byte {
+                            UPPER_C => http::HttpConnect,     // or CHECKOUT, COPY
+                            UPPER_D => http::HttpDelete,
+                            UPPER_G => http::HttpGet,
+                            UPPER_H => http::HttpHead,
+                            UPPER_L => http::HttpLink,        // or LOCK
+                            UPPER_M => http::HttpMkCol,       // or M-SEARCH, MERGE, MKACTIVITY, MKCALENDER
+                            UPPER_N => http::HttpNotify,
+                            UPPER_O => http::HttpOptions,
+                            UPPER_P => http::HttpPut,         // or PATCH, POST, PROPPATCH, PROPFIND
+                            UPPER_R => http::HttpReport,
+                            UPPER_S => http::HttpSearch,      // or SUBSCRIBE
+                            UPPER_T => http::HttpTrace,
+                            UPPER_U => http::HttpUnlink,      // or UNLOCK, UNSUBSCRIBE
                             CR | LF => break,
                             _   => { self.state = Crashed; return Err(InvalidMethod) },
                         });
@@ -210,40 +203,40 @@ impl Parser {
                         self.index = 1;
                     }
                     StartRes => {
-                        match byte as char {
-                            'H' => {
-                                self.state = ResHttpStart;
+                        match byte {
+                            UPPER_H => {
+                                self.state = HttpStart;
                                 self.index = 1;
                             },
                             CR | LF => break,
-                            _   => { self.state = Crashed; return Err(InvalidMethod) },
+                            _ => { self.state = Crashed; return Err(InvalidMethod) },
                         }
                         handler.on_message_begin(self);
                     }
                     ReqMethod => {
                         let method = self.method.unwrap();
-                        if byte as char == ' ' {
+                        if byte == SPACE {
                             handler.on_method(self, method);
                             self.state = ReqUrl;
                             self.index = 0;
                         } else {
                             if !method.hit(self.index, byte as char) {
-                                self.method = Some(match method {
-                                    http::HttpConnect    if self.index == 2 && byte as char == 'H' => http::HttpCheckout,
-                                    http::HttpConnect    if self.index == 3 && byte as char == 'P' => http::HttpCheckout,
-                                    http::HttpLink       if self.index == 1 && byte as char == 'O' => http::HttpLock,
-                                    http::HttpMkCol      if self.index == 1 && byte as char == '-' => http::HttpMsearch,
-                                    http::HttpMkCol      if self.index == 1 && byte as char == 'E' => http::HttpMerge,
-                                    http::HttpMkCol      if self.index == 2 && byte as char == 'A' => http::HttpMkActivity,
-                                    http::HttpMkCol      if self.index == 3 && byte as char == 'A' => http::HttpMkCalendar,
-                                    http::HttpPut        if self.index == 1 && byte as char == 'A' => http::HttpPatch,
-                                    http::HttpPut        if self.index == 1 && byte as char == 'O' => http::HttpPost,
-                                    http::HttpPut        if self.index == 1 && byte as char == 'R' => http::HttpPropPatch,
-                                    http::HttpPut        if self.index == 2 && byte as char == 'R' => http::HttpPurge,
-                                    http::HttpPropPatch  if self.index == 4 && byte as char == 'F' => http::HttpPropFind,
-                                    http::HttpSearch     if self.index == 1 && byte as char == 'U' => http::HttpSubscribe,
-                                    http::HttpUnlink     if self.index == 2 && byte as char == 'S' => http::HttpUnsubscribe,
-                                    http::HttpUnlink     if self.index == 3 && byte as char == 'O' => http::HttpUnlock,
+                                self.method = Some(match (method, self.index, byte) {
+                                    (http::HttpConnect, 1, UPPER_H)   => http::HttpCheckout,
+                                    (http::HttpConnect, 2, UPPER_P)   => http::HttpCopy,
+                                    (http::HttpLink, 1, UPPER_O)      => http::HttpLock,
+                                    (http::HttpMkCol, 1, HYPHEN)      => http::HttpMsearch,
+                                    (http::HttpMkCol, 1, UPPER_E)     => http::HttpMerge,
+                                    (http::HttpMkCol, 2, UPPER_A)     => http::HttpMkActivity,
+                                    (http::HttpMkCol, 3, UPPER_A)     => http::HttpMkCalendar,
+                                    (http::HttpPut, 1, UPPER_A)       => http::HttpPatch,
+                                    (http::HttpPut, 1, UPPER_O)       => http::HttpPost,
+                                    (http::HttpPut, 1, UPPER_R)       => http::HttpPropPatch,
+                                    (http::HttpPut, 2, UPPER_R)       => http::HttpPurge,
+                                    (http::HttpPropPatch, 4, UPPER_F) => http::HttpPropFind,
+                                    (http::HttpSearch, 1, UPPER_U)    => http::HttpSubscribe,
+                                    (http::HttpUnlink, 2, UPPER_S)    => http::HttpUnsubscribe,
+                                    (http::HttpUnlink, 3, UPPER_O)    => http::HttpUnlock,
                                     _ => { self.state = Crashed; return Err(InvalidMethod) },
                                 });
                             }
@@ -251,14 +244,14 @@ impl Parser {
                         }
                     }
                     ReqUrl => {
-                        match byte as char {
-                            ' ' => {
+                        match byte {
+                            SPACE => {
                                 if self.index == 0 { self.state = Crashed; return Err(InvalidUrl) }
                                 let start = if read > self.index + 1 { read - self.index - 1 } else { 0 };
                                 let end = read - 1;
                                 handler.write(self, data.slice(start, end));
                                 handler.on_url(self, self.index);
-                                self.state = ReqHttpStart;
+                                self.state = HttpStart;
                                 self.index = 0;
                             }
                             CR | LF => {
@@ -278,141 +271,80 @@ impl Parser {
                             }
                         }
                     }
-                    ReqHttpStart => {
-                        let c = byte as char;
-                        if (c != 'H' && self.index == 0)
-                            || (c != 'T' && (self.index == 1 || self.index == 2))
-                            || (c != 'P' && self.index == 3)
-                            || (c != '/' && self.index == 4)
-                            || ((byte < '0' as u8 || byte > '9' as u8) && self.index == 5) {
+                    HttpStart => {
+                        match (byte, self.index) {
+                            (UPPER_H, 0)    => self.index += 1,
+                            (UPPER_T, 1..2) => self.index += 1,
+                            (UPPER_P, 3)    => self.index += 1,
+                            (SLASH, 4)      => self.index += 1,
+                            (ZERO..NINE, 5) => {
+                                self.state = HttpMajor;
+                                self.major = (byte - ZERO) as uint;
+                                self.index = 1;
+                            }
+                            _ => {
                                 self.state = Crashed;
                                 return Err(InvalidVersion);
                             }
-                        if self.index == 5 {
-                            self.state = ReqHttpMajor;
-                            self.major = byte as uint - '0' as uint;
-                            self.index = 1;
-                        } else {
-                            self.index += 1;
                         }
                     }
-                    ReqHttpMajor => {
-                        match byte as char {
-                            '.' if self.index > 0 => {
-                                self.state = ReqHttpMinor;
+                    HttpMajor => {
+                        match byte {
+                            DOT if self.index > 0 => {
+                                self.state = HttpMinor;
                                 self.index = 0;
                             }
-                            n if n >= '0' && n <= '9' => {
+                            ZERO..NINE => {
                                 self.index += 1;
                                 self.major *= 10;
-                                self.major += n as uint - '0' as uint;
+                                self.major += (byte - ZERO) as uint;
                             }
                             _ => { self.state = Crashed; return Err(InvalidVersion) },
                         }
                     }
-                    ReqHttpMinor => {
-                        match byte as char {
-                            n if n >= '0' && n <= '9' => {
+                    HttpMinor => {
+                        match (byte, self.index, self.parser_type) {
+                            (ZERO..NINE, _, _) => {
                                 self.index += 1;
                                 self.minor *= 10;
-                                self.minor += n as uint - '0' as uint;
+                                self.minor += (byte - ZERO) as uint;
                             }
-                            CR | LF if self.index > 0 => match http::HttpVersion::find(self.major, self.minor) {
-                                None => { self.state = Crashed; return Err(InvalidVersion) },
-                                v => {
-                                    handler.on_version(self, v.unwrap());
-                                    self.http_version = v;
-                                    self.keep_alive = v == Some(http::HTTP_1_1);
-                                    self.state = if byte as char == CR {
-                                        ReqLineAlmostDone
-                                    } else {
-                                        HeaderFieldStart
-                                    };
-                                    self.index = 0;
+                            (CR, 1..2, ParseRequest) | (LF, 1..2, ParseRequest) | (SPACE, 1..2, ParseResponse) => {
+                                match http::HttpVersion::find(self.major, self.minor) {
+                                    None => { self.state = Crashed; return Err(InvalidVersion) }
+                                    v => {
+                                        handler.on_version(self, v.unwrap());
+                                        self.http_version = v;
+                                        self.keep_alive = v == Some(http::HTTP_1_1);
+                                        self.state = match (byte, self.parser_type) {
+                                            (CR, ParseRequest) => ReqLineAlmostDone,
+                                            (LF, ParseRequest) => HeaderFieldStart,
+                                            (SPACE, ParseResponse) => ResStatusCode,
+                                            _ => { self.state = Crashed; return Err(InvalidVersion) }
+                                        };
+                                        self.index = 0;
+                                    }
                                 }
-                            },
+                            }
                             _ => { self.state = Crashed; return Err(InvalidVersion) },
                         }
                     }
                     ReqLineAlmostDone => {
-                        if byte as char != LF {
-                            return Err(InvalidRequestLine);
-                        }
+                        if byte != LF { self.state = Crashed; return Err(InvalidRequestLine) }
                         self.state = HeaderFieldStart;
                     }
-                    ResHttpStart => {
-                        let c = byte as char;
-                        if (c != 'T' && (self.index == 1 || self.index == 2))
-                            || (c != 'P' && self.index == 3)
-                            || (c != '/' && self.index == 4)
-                            || ((byte < '0' as u8 || byte > '9' as u8) && self.index == 5) {
-                                self.state = Crashed;
-                                return Err(InvalidVersion);
-                            }
-                        if self.index == 5 {
-                            self.state = ResHttpMajor;
-                            self.major = byte as uint - '0' as uint;
-                            self.index = 1;
-                        } else {
-                            self.index += 1;
-                        }
-                    }
-                    ResHttpMajor => {
-                        match byte as char {
-                            '.' if self.index > 0 => {
-                                self.state = ResHttpMinor;
-                                self.index = 0;
-                            }
-                            n if n >= '0' && n <= '9' => {
-                                self.index += 1;
-                                self.major *= 10;
-                                self.major += n as uint - '0' as uint;
-                            }
-                            _ => { self.state = Crashed; return Err(InvalidVersion) },
-                        }
-                    }
-                    ResHttpMinor => {
-                        match byte as char {
-                            n if n >= '0' && n <= '9' => {
-                                self.index += 1;
-                                self.minor *= 10;
-                                self.minor += n as uint - '0' as uint;
-                            }
-                            ' ' if self.index > 0 => match http::HttpVersion::find(self.major, self.minor) {
-                                None => { self.state = Crashed; return Err(InvalidVersion) },
-                                v => {
-                                    handler.on_version(self, v.unwrap());
-                                    self.http_version = v;
-                                    self.keep_alive = v == Some(http::HTTP_1_1);
-                                    self.state = ResStatusCode;
-                                    self.index = 0;
-                                }
-                            },
-                            _ => { self.state = Crashed; return Err(InvalidVersion) },
-                        }
-                    }
-                    ResStatusCodeStart => {
-                        if byte >= '0' as u8 && byte <= '9' as u8 {
-                            self.state = ResStatusCode;
-                            self.status_code = byte as uint - '0' as uint;
-                            self.index = 1;
-                        } else if byte as char != ' ' {
-                            self.state = Crashed;
-                            return Err(InvalidStatusCode);
-                        }
-                    }
                     ResStatusCode => {
-                        if byte >= '0' as u8 && byte <= '9' as u8 && self.index < 3 {
+                        if byte >= ZERO && byte <= NINE && self.index < 3 {
                             self.status_code *= 10;
-                            self.status_code += byte as uint - '0' as uint;
+                            self.status_code += (byte - ZERO) as uint;
                             self.index += 1;
                         } else {
                             handler.on_status(self, self.status_code);
-                            self.state = match byte as char {
-                                ' ' => ResStatus,
-                                CR  => ResLineAlmostDone,
-                                LF  => HeaderFieldStart,
-                                _   => {
+                            self.state = match byte {
+                                SPACE => ResStatus,
+                                CR   => ResLineAlmostDone,
+                                LF   => HeaderFieldStart,
+                                _     => {
                                     self.state = Crashed;
                                     return Err(InvalidStatusLine);
                                 }
@@ -421,20 +353,18 @@ impl Parser {
                         }
                     }
                     ResStatus => {
-                        self.state = match byte as char {
+                        self.state = match byte {
                             CR => ResLineAlmostDone,
                             LF => HeaderFieldStart,
-                            _  => ResStatus,
+                            _   => ResStatus, // ignore reason phrases
                         };
                     }
                     ResLineAlmostDone => {
-                        if byte as char != LF {
-                            return Err(InvalidStatusLine);
-                        }
+                        if byte != LF { self.state = Crashed; return Err(InvalidStatusLine) }
                         self.state = HeaderFieldStart;
                     }
                     HeaderFieldStart => {
-                        match byte as char {
+                        match byte {
                             CR => self.state = HeadersAlmostDone,
                             LF => {
                                 if handler.on_headers_complete(self) || self.skip_body {
@@ -457,13 +387,13 @@ impl Parser {
                                 };
                                 break
                             }
-                            c if is_token(c) => {
+                            0x21..0x7e => {
                                 self.state = HeaderField;
-                                self.hstate = match to_lowercase(c) {
-                                    'c' => HeaderConnection,
-                                    't' => HeaderTransferEncoding,
-                                    'u' => HeaderUpgrade,
-                                    _   => HeaderGeneral,
+                                self.hstate = match byte {
+                                    UPPER_C | LOWER_C => HeaderConnection,
+                                    UPPER_T | LOWER_T => HeaderTransferEncoding,
+                                    UPPER_U | LOWER_U => HeaderUpgrade,
+                                    _                 => HeaderGeneral,
                                 };
                                 self.index = 1;
                             }
@@ -471,8 +401,8 @@ impl Parser {
                         }
                     }
                     HeaderField => {
-                        match byte as char {
-                            ':' => {
+                        match byte {
+                            COLON => {
                                 let start = if read > self.index + 1 { read - self.index - 1} else { 0 };
                                 let end = read - 1;
                                 handler.write(self, data.slice(start, end));
@@ -488,52 +418,51 @@ impl Parser {
                                 self.state = HeaderFieldStart;
                                 self.index = 0;
                             }
-                            c if is_token(c) => {
+                            0x21..0x7e => {
                                 if self.hstate != HeaderGeneral {
                                     self.hstate = match self.hstate {
-                                        HeaderConnection => match to_lowercase(c) {
-                                            'o' if self.index == 1 => HeaderConnection,
-                                            'n' if self.index == 2 => HeaderConnection,
-                                            'n' if self.index == 3 => HeaderConnection,
-                                            'e' if self.index == 4 => HeaderConnection,
-                                            'c' if self.index == 5 => HeaderConnection,
-                                            't' if self.index == 6 => HeaderConnection,
-                                            'i' if self.index == 7 => HeaderConnection,
-                                            'o' if self.index == 8 => HeaderConnection,
-                                            'n' if self.index == 9 => HeaderConnection,
-                                            't' if self.index == 3 => HeaderContentLength,
+                                        HeaderConnection => match (byte, self.index) {
+                                            (UPPER_T, 3) | (LOWER_T, 3) => HeaderContentLength,
+                                            (UPPER_O, 1) | (LOWER_O, 1)
+                                                | (UPPER_N, 2..3) | (LOWER_N, 2..3)
+                                                | (UPPER_E, 4) | (LOWER_E, 4)
+                                                | (UPPER_C, 5) | (LOWER_C, 5)
+                                                | (UPPER_T, 6) | (LOWER_T, 6)
+                                                | (UPPER_I, 7) | (LOWER_I, 7)
+                                                | (UPPER_O, 8) | (LOWER_O, 8)
+                                                | (UPPER_N, 9) | (LOWER_N, 9) => HeaderConnection,
                                             _ => HeaderGeneral,
                                         },
-                                        HeaderContentLength => match to_lowercase(c) {
-                                            'e' if self.index == 4  => HeaderContentLength,
-                                            'n' if self.index == 5  => HeaderContentLength,
-                                            't' if self.index == 6  => HeaderContentLength,
-                                            '-' if self.index == 7  => HeaderContentLength,
-                                            'l' if self.index == 8  => HeaderContentLength,
-                                            'e' if self.index == 9  => HeaderContentLength,
-                                            'n' if self.index == 10 => HeaderContentLength,
-                                            'g' if self.index == 11 => HeaderContentLength,
-                                            't' if self.index == 12 => HeaderContentLength,
-                                            'h' if self.index == 13 => HeaderContentLength,
+                                        HeaderContentLength => match (byte, self.index) {
+                                            (UPPER_E, 4) | (LOWER_E, 4)
+                                                | (UPPER_N, 5)  | (LOWER_N, 5)
+                                                | (UPPER_T, 6)  | (LOWER_T, 6)
+                                                | (HYPHEN, 7)
+                                                | (UPPER_L, 8)  | (LOWER_L, 8)
+                                                | (UPPER_E, 9)  | (LOWER_E, 9)
+                                                | (UPPER_N, 10) | (LOWER_N, 10)
+                                                | (UPPER_G, 11) | (LOWER_G, 11)
+                                                | (UPPER_T, 12) | (LOWER_T, 12)
+                                                | (UPPER_H, 13) | (LOWER_H, 13) => HeaderContentLength,
                                             _ => HeaderGeneral,
                                         },
-                                        HeaderTransferEncoding => match to_lowercase(c) {
-                                            'r' if self.index == 1  => HeaderTransferEncoding,
-                                            'a' if self.index == 2  => HeaderTransferEncoding,
-                                            'n' if self.index == 3  => HeaderTransferEncoding,
-                                            's' if self.index == 4  => HeaderTransferEncoding,
-                                            'f' if self.index == 5  => HeaderTransferEncoding,
-                                            'e' if self.index == 6  => HeaderTransferEncoding,
-                                            'r' if self.index == 7  => HeaderTransferEncoding,
-                                            '-' if self.index == 8  => HeaderTransferEncoding,
-                                            'e' if self.index == 9  => HeaderTransferEncoding,
-                                            'n' if self.index == 10 => HeaderTransferEncoding,
-                                            'c' if self.index == 11 => HeaderTransferEncoding,
-                                            'o' if self.index == 12 => HeaderTransferEncoding,
-                                            'd' if self.index == 13 => HeaderTransferEncoding,
-                                            'i' if self.index == 14 => HeaderTransferEncoding,
-                                            'n' if self.index == 15 => HeaderTransferEncoding,
-                                            'g' if self.index == 16 => HeaderTransferEncoding,
+                                        HeaderTransferEncoding => match (byte, self.index) {
+                                            (UPPER_R, 1) | (LOWER_R, 1)
+                                                | (UPPER_A, 2)  | (LOWER_A, 2)
+                                                | (UPPER_N, 3)  | (LOWER_N, 3)
+                                                | (UPPER_S, 4)  | (LOWER_S, 4)
+                                                | (UPPER_F, 5)  | (LOWER_F, 5)
+                                                | (UPPER_E, 6)  | (LOWER_E, 6)
+                                                | (UPPER_R, 7)  | (LOWER_R, 7)
+                                                | (HYPHEN, 8)
+                                                | (UPPER_E, 9)  | (LOWER_E, 9)
+                                                | (UPPER_N, 10) | (LOWER_N, 10)
+                                                | (UPPER_C, 11) | (LOWER_C, 11)
+                                                | (UPPER_O, 12) | (LOWER_O, 12)
+                                                | (UPPER_D, 13) | (LOWER_D, 13)
+                                                | (UPPER_I, 14) | (LOWER_I, 14)
+                                                | (UPPER_N, 15) | (LOWER_N, 15)
+                                                | (UPPER_G, 16) | (LOWER_G, 16) => HeaderTransferEncoding,
                                             _ => HeaderGeneral,
                                         },
                                         _ => HeaderGeneral,
@@ -545,19 +474,22 @@ impl Parser {
                         }
                     }
                     HeaderValueDiscardWS => {
-                        match byte as char {
-                            ' ' | '\t' => (), // skip
+                        match byte {
+                            SPACE | TAB => (), // skip
                             CR => self.state = HeaderValueDiscardWSAlmostDone,
                             LF => self.state = HeaderValueDiscardLWS,
                             _ => {
-                                let c = to_lowercase(byte as char);
-                                self.hstate = match self.hstate {
-                                    HeaderConnection if c == 'c' => HeaderMatchingClose,
-                                    HeaderConnection if c == 'k' => HeaderMatchingKeepAlive,
-                                    HeaderConnection if c == 'u' => HeaderMatchingUpgrade,
-                                    HeaderTransferEncoding if c == 'c' => HeaderMatchingChunked,
-                                    HeaderContentLength => {
-                                        self.message_body_rest = byte as uint - '0' as uint;
+                                self.hstate = match (self.hstate, byte) {
+                                    (HeaderConnection, UPPER_C)
+                                        | (HeaderConnection, LOWER_C) => HeaderMatchingClose,
+                                    (HeaderConnection, UPPER_K)
+                                        | (HeaderConnection, LOWER_K) => HeaderMatchingKeepAlive,
+                                    (HeaderConnection, UPPER_U)
+                                        | (HeaderConnection, LOWER_U) => HeaderMatchingUpgrade,
+                                    (HeaderTransferEncoding, UPPER_C)
+                                        | (HeaderTransferEncoding, LOWER_C) => HeaderMatchingChunked,
+                                    (HeaderContentLength, _) => {
+                                        self.message_body_rest = (byte - ZERO) as uint;
                                         HeaderContentLength
                                     },
                                     _ => HeaderGeneral,
@@ -568,17 +500,17 @@ impl Parser {
                         }
                     }
                     HeaderValueDiscardWSAlmostDone => {
-                        if byte as char != LF { self.state = Crashed; return Err(InvalidHeaderField) }
+                        if byte != LF { self.state = Crashed; return Err(InvalidHeaderField) }
                         self.state = HeaderValueDiscardLWS;
                     }
                     HeaderValueDiscardLWS => {
-                        if byte as char == ' ' || byte as char == '\t' {
+                        if byte == SPACE || byte == TAB {
                             self.state = HeaderValueDiscardWS;
                         } else {
                             // header value is empty.
                             handler.on_header_value(self, 0);
                             self.index = 0;
-                            match byte as char {
+                            match byte {
                                 CR => self.state = HeadersAlmostDone,
                                 LF => {
                                     if handler.on_headers_complete(self) || self.upgrade || self.skip_body {
@@ -604,7 +536,7 @@ impl Parser {
                                     };
                                     break
                                 }
-                                c if is_token(c) => {
+                                0x21..0x7e => {
                                     self.state = HeaderFieldStart;
                                     self.index = 1;
                                 }
@@ -613,18 +545,18 @@ impl Parser {
                         }
                     }
                     HeaderValue => {
-                        match byte as char {
+                        match byte {
                             CR | LF => {
-                                self.state = if byte as char == CR {
+                                self.state = if byte == CR {
                                     HeaderAlmostDone
                                 } else {
                                     HeaderFieldStart
                                 };
-                                match self.hstate {
-                                    HeaderMatchingChunked   if self.index == 7  => self.chunked = true,
-                                    HeaderMatchingClose     if self.index == 5  => self.keep_alive = false,
-                                    HeaderMatchingKeepAlive if self.index == 10 => self.keep_alive = true,
-                                    HeaderMatchingUpgrade   if self.index == 6  => self.upgrade = true,
+                                match (self.hstate, self.index) {
+                                    (HeaderMatchingChunked, 7)    => self.chunked = true,
+                                    (HeaderMatchingClose, 5)      => self.keep_alive = false,
+                                    (HeaderMatchingKeepAlive, 10) => self.keep_alive = true,
+                                    (HeaderMatchingUpgrade, 6)    => self.upgrade = true,
                                     _ => (),
                                 }
                                 let start = if read > self.index + 1 { read - self.index - 1 } else { 0 };
@@ -634,52 +566,51 @@ impl Parser {
                                 self.index = 0;
                             }
                             _ => {
-                                if self.hstate != HeaderGeneral && is_token(byte as char) {
-                                    let c = to_lowercase(byte as char);
-                                    self.hstate = match self.hstate {
-                                        HeaderMatchingKeepAlive => match c {
-                                            'e' if self.index == 1 => HeaderMatchingKeepAlive,
-                                            'e' if self.index == 2 => HeaderMatchingKeepAlive,
-                                            'p' if self.index == 3 => HeaderMatchingKeepAlive,
-                                            '-' if self.index == 4 => HeaderMatchingKeepAlive,
-                                            'a' if self.index == 5 => HeaderMatchingKeepAlive,
-                                            'l' if self.index == 6 => HeaderMatchingKeepAlive,
-                                            'i' if self.index == 7 => HeaderMatchingKeepAlive,
-                                            'v' if self.index == 8 => HeaderMatchingKeepAlive,
-                                            'e' if self.index == 9 => HeaderMatchingKeepAlive,
+                                if self.hstate != HeaderGeneral {
+                                    self.hstate = match (self.hstate, byte) {
+                                        (HeaderMatchingKeepAlive, _) => match (byte, self.index) {
+                                            (UPPER_E, 1) | (LOWER_E, 1)
+                                                | (UPPER_E, 2) | (LOWER_E, 2)
+                                                | (UPPER_P, 3) | (LOWER_P, 3)
+                                                | (HYPHEN, 4)
+                                                | (UPPER_A, 5) | (LOWER_A, 5)
+                                                | (UPPER_L, 6) | (LOWER_L, 6)
+                                                | (UPPER_I, 7) | (LOWER_I, 7)
+                                                | (UPPER_V, 8) | (LOWER_V, 8)
+                                                | (UPPER_E, 9) | (LOWER_E, 9) => HeaderMatchingKeepAlive,
                                             _ => HeaderGeneral,
                                         },
-                                        HeaderMatchingClose => match c {
-                                            'l' if self.index == 1 => HeaderMatchingClose,
-                                            'o' if self.index == 2 => HeaderMatchingClose,
-                                            's' if self.index == 3 => HeaderMatchingClose,
-                                            'e' if self.index == 4 => HeaderMatchingClose,
+                                        (HeaderMatchingClose, _) => match (byte, self.index) {
+                                            (UPPER_L, 1) | (LOWER_L, 1)
+                                                | (UPPER_O, 2) | (LOWER_O, 2)
+                                                | (UPPER_S, 3) | (LOWER_S, 3)
+                                                | (UPPER_E, 4) | (LOWER_E, 4) => HeaderMatchingClose,
                                             _ => HeaderGeneral,
                                         },
-                                        HeaderMatchingChunked => match c {
-                                            'h' if self.index == 1 => HeaderMatchingChunked,
-                                            'u' if self.index == 2 => HeaderMatchingChunked,
-                                            'n' if self.index == 3 => HeaderMatchingChunked,
-                                            'k' if self.index == 4 => HeaderMatchingChunked,
-                                            'e' if self.index == 5 => HeaderMatchingChunked,
-                                            'd' if self.index == 6 => HeaderMatchingChunked,
+                                        (HeaderMatchingChunked, _) => match (byte, self.index) {
+                                            (UPPER_H, 1) | (LOWER_H, 1)
+                                                | (UPPER_U, 2) | (LOWER_U, 2)
+                                                | (UPPER_N, 3) | (LOWER_N, 3)
+                                                | (UPPER_K, 4) | (LOWER_K, 4)
+                                                | (UPPER_E, 5) | (LOWER_E, 5)
+                                                | (UPPER_D, 6) | (LOWER_D, 6) => HeaderMatchingChunked,
                                             _ => HeaderGeneral,
                                         },
-                                        HeaderMatchingUpgrade => match c {
-                                            'p' if self.index == 1 => HeaderMatchingUpgrade,
-                                            'g' if self.index == 2 => HeaderMatchingUpgrade,
-                                            'r' if self.index == 3 => HeaderMatchingUpgrade,
-                                            'a' if self.index == 4 => HeaderMatchingUpgrade,
-                                            'd' if self.index == 5 => HeaderMatchingUpgrade,
-                                            'e' if self.index == 6 => HeaderMatchingUpgrade,
+                                        (HeaderMatchingUpgrade, _) => match (byte, self.index) {
+                                            (UPPER_P, 1) | (LOWER_P, 1)
+                                                | (UPPER_G, 2) | (LOWER_G, 2)
+                                                | (UPPER_R, 3) | (LOWER_R, 3)
+                                                | (UPPER_A, 4) | (LOWER_A, 4)
+                                                | (UPPER_D, 5) | (LOWER_D, 5)
+                                                | (UPPER_E, 6) | (LOWER_E, 6) => HeaderMatchingUpgrade,
                                             _ => HeaderGeneral,
                                         },
-                                        HeaderContentLength if byte >= '0' as u8 && byte <= '9' as u8 => {
+                                        (HeaderContentLength, ZERO..NINE) => {
                                             self.message_body_rest *= 10;
-                                            self.message_body_rest += byte as uint - '0' as uint;
+                                            self.message_body_rest += (byte - ZERO) as uint;
                                             HeaderContentLength
                                         }
-                                        HeaderContentLength if byte < '0' as u8 || byte > '9' as u8 => {
+                                        (HeaderContentLength, _) => {
                                             self.message_body_rest = UINT_MAX;
                                             HeaderGeneral
                                         }
@@ -691,11 +622,11 @@ impl Parser {
                         }
                     }
                     HeaderAlmostDone => {
-                        if byte as char != LF { self.state = Crashed; return Err(InvalidHeaderField) }
+                        if byte != LF { self.state = Crashed; return Err(InvalidHeaderField) }
                         self.state = HeaderFieldStart;
                     }
                     HeadersAlmostDone => {
-                        if byte as char != LF { self.state = Crashed; return Err(InvalidHeaders) }
+                        if byte != LF { self.state = Crashed; return Err(InvalidHeaders) }
                         if handler.on_headers_complete(self) || self.upgrade || self.skip_body {
                             handler.on_message_complete(self);
                             self.reset();
@@ -720,8 +651,9 @@ impl Parser {
 
                         break
                     }
-                    BodyIdentity | BodyIdentityEOF | Dead | Crashed => unreachable!(),
-                    _ => unimplemented!()
+                    BodyIdentity | BodyIdentityEOF
+                        | ChunkSize | ChunkSizeAlmostDone | ChunkExtension | ChunkData
+                        | Dead | Crashed => unreachable!(),
                 }
             }
         }
@@ -731,7 +663,7 @@ impl Parser {
                 if self.state == ChunkData {
                     let rest = data.len() - read;
                     if self.message_body_rest == 0 && rest > 2 {
-                        if data[read] as char != CR || data[read+1] as char != LF {
+                        if data[read] != CR || data[read+1] != LF {
                             self.state = Crashed;
                             return Err(InvalidChunk);
                         }
@@ -753,25 +685,25 @@ impl Parser {
                 } else {
                     'chunksize: for &byte in data.slice_from(read).iter() {
                         read += 1;
-                        match self.state {
-                            ChunkExtension if byte as char == CR => {
+                        match (self.state, byte) {
+                            (ChunkExtension, CR) => {
                                 self.state = ChunkSizeAlmostDone;
                             }
-                            ChunkExtension => { /* ignore */ }
-                            ChunkSize if byte as char == ';' => {
+                            (ChunkExtension, _) => { /* ignore */ }
+                            (ChunkSize, SEMICOLON) => {
                                 self.state = ChunkExtension;
                             }
-                            ChunkSize if byte as char == CR => {
+                            (ChunkSize, CR) => {
                                 self.state = ChunkSizeAlmostDone;
                             }
-                            ChunkSize => {
+                            (ChunkSize, _) => {
                                 let val = unhex(byte);
                                 if val > 15 { self.state = Crashed; return Err(InvalidChunk) }
                                 self.message_body_rest *= 16;
                                 self.message_body_rest += val;
                             }
-                            ChunkSizeAlmostDone => {
-                                if byte as char != LF { self.state = Crashed; return Err(InvalidChunk) }
+                            (ChunkSizeAlmostDone, _) => {
+                                if byte != LF { self.state = Crashed; return Err(InvalidChunk) }
                                 if self.message_body_rest == 0 {
                                     handler.on_message_complete(self);
                                     break 'chunk;
@@ -802,6 +734,9 @@ impl Parser {
                     self.message_body_rest -= rest;
                 }
             }
+            BodyIdentityEOF if data.len() != read => {
+                handler.write(self, data.slice_from(read));
+            }
             ReqUrl | HeaderField | HeaderValue => {
                 let start = if read > self.index { read - self.index } else { 0 };
                 handler.write(self, data.slice(start, read));
@@ -822,7 +757,7 @@ impl Parser {
         self.upgrade
     }
 
-    /// Connection: upgrade
+    /// Transfer-Encoding: chunked
     pub fn chunked(&self) -> bool {
         self.chunked
     }
@@ -832,7 +767,6 @@ impl Parser {
         self.state = match self.parser_type {
             ParseRequest  => StartReq,
             ParseResponse => StartRes,
-            ParseBoth     => StartReqOrRes,
         };
         self.index = 0;
         self.major = 0;
@@ -858,58 +792,70 @@ impl Parser {
     }
 }
 
-#[inline]
-fn is_token(c: char) -> bool {
-    (c >= '^' && c <= 'z')
-        || (c >= 'A' && c <= 'Z')
-        || (c >= '-' && c <= '.')
-        || (c >= '#' && c <= '\\')
-        || (c >= '*' && c <= '+')
-        || (c >= '0' && c <= '9')
-        || c == '!'
-        || c == '|'
-        || c == '~'
-}
+static TAB: u8       = 0x09;
+static LF: u8        = 0x0a;
+static CR: u8        = 0x0d;
+static SPACE: u8     = 0x20;
+static HYPHEN: u8    = 0x2d;
+static DOT: u8       = 0x2e;
+static SLASH: u8     = 0x2f;
+static ZERO: u8      = 0x30;
+static NINE: u8      = 0x39;
+static COLON: u8     = 0x3a;
+static SEMICOLON: u8 = 0x3b;
+static UPPER_A: u8   = 0x41;
+static UPPER_C: u8   = 0x43;
+static UPPER_D: u8   = 0x44;
+static UPPER_E: u8   = 0x45;
+static UPPER_F: u8   = 0x46;
+static UPPER_G: u8   = 0x47;
+static UPPER_H: u8   = 0x48;
+static UPPER_I: u8   = 0x49;
+static UPPER_K: u8   = 0x4b;
+static UPPER_L: u8   = 0x4c;
+static UPPER_M: u8   = 0x4d;
+static UPPER_N: u8   = 0x4e;
+static UPPER_O: u8   = 0x4f;
+static UPPER_P: u8   = 0x50;
+static UPPER_R: u8   = 0x52;
+static UPPER_S: u8   = 0x53;
+static UPPER_T: u8   = 0x54;
+static UPPER_U: u8   = 0x55;
+static UPPER_V: u8   = 0x56;
+static LOWER_A: u8   = 0x61;
+static LOWER_C: u8   = 0x63;
+static LOWER_D: u8   = 0x64;
+static LOWER_E: u8   = 0x65;
+static LOWER_F: u8   = 0x66;
+static LOWER_G: u8   = 0x67;
+static LOWER_H: u8   = 0x68;
+static LOWER_I: u8   = 0x69;
+static LOWER_K: u8   = 0x6b;
+static LOWER_L: u8   = 0x6c;
+static LOWER_N: u8   = 0x6e;
+static LOWER_O: u8   = 0x6f;
+static LOWER_P: u8   = 0x70;
+static LOWER_R: u8   = 0x72;
+static LOWER_S: u8   = 0x73;
+static LOWER_T: u8   = 0x74;
+static LOWER_U: u8   = 0x75;
+static LOWER_V: u8   = 0x76;
 
 #[inline]
 fn unhex(b: u8) -> uint {
-    match to_lowercase(b as char) {
-        '0' => 0,
-        '1' => 1,
-        '2' => 2,
-        '3' => 3,
-        '4' => 4,
-        '5' => 5,
-        '6' => 6,
-        '7' => 7,
-        '8' => 8,
-        '9' => 9,
-        'a' => 10,
-        'b' => 11,
-        'c' => 12,
-        'd' => 13,
-        'e' => 14,
-        'f' => 15,
-        _   => UINT_MAX,
-    }
+    if b < ZERO || b > NINE { UINT_MAX } else { (b - ZERO) as uint }
 }
 
 #[deriving(PartialEq, Eq, Clone, Show)]
 enum ParserState {
-    Dead,
     StartReq,
     StartRes,
-    StartReqOrRes,
     ReqMethod,
     ReqUrl,
-    ReqHttpStart,
-    ReqHttpMajor,
-    ReqHttpMinor,
+    HttpStart,
+    HttpMajor,
+    HttpMinor,
     ReqLineAlmostDone,
-    ResHttpStart,
-    ResHttpMajor,
-    ResHttpMinor,
-    ResStatusCodeStart,
     ResStatusCode,
     ResStatus,
     ResLineAlmostDone,
@@ -918,7 +864,6 @@ enum ParserState {
     HeaderValueDiscardWS,
     HeaderValueDiscardWSAlmostDone,
     HeaderValueDiscardLWS,
-    HeaderValueStart,
     HeaderValue,
     HeaderAlmostDone,
     HeadersAlmostDone,
@@ -928,6 +873,7 @@ enum ParserState {
     ChunkSizeAlmostDone,
     ChunkExtension,
     ChunkData,
+    Dead,
     Crashed,
 }
 

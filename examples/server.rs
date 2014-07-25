@@ -286,15 +286,15 @@ fn handle_error(stream: &mut TcpStream) {
 fn main() {
     let mut args: Vec<String> = os::args();
 
-    let program = args.shift();
+    let program = args.remove(0).unwrap();
     if args.len() < 2 {
         println!("usage: {} <host> <port>", program);
         os::set_exit_status(1);
         return;
     }
 
-    let host = args.shift().unwrap();
-    let port = args.shift().unwrap();
+    let host = args.remove(0).unwrap();
+    let port = args.remove(0).unwrap();
     let listener = TcpListener::bind(host.as_slice(), from_str::<u16>(port.as_slice()).unwrap());
     let mut acceptor = listener.listen();
 
