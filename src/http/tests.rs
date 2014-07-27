@@ -200,7 +200,7 @@ mod http_1_1 {
     fn test_response_chunked() {
         let msg = create_response(1, "200 OK",
                                   Some(vec!("Content-Type", "text/plain", "Transfer-Encoding", "chunked")),
-                                  Some("10\r\nHello, HTTP worl\r\n2;chunk-ext-name\r\nd!\r\n0\r\n"));
+                                  Some("F\r\nHello, HTTP wor\r\n3;chunk-ext-name\r\nld!\r\n0\r\n"));
         let data = msg.as_bytes();
         let mut parser = Parser::new(ParseResponse);
         let mut handler = TestHandler::new();
