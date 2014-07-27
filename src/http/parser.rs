@@ -836,7 +836,12 @@ static LOWER_V: u8   = 0x76;
 
 #[inline]
 fn unhex(b: u8) -> uint {
-    if b < ZERO || b > NINE { UINT_MAX } else { (b - ZERO) as uint }
+    match b {
+        ZERO..NINE => (b - ZERO) as uint,
+        UPPER_A..UPPER_F => (b - UPPER_A) as uint + 10u,
+        LOWER_A..LOWER_F => (b - LOWER_A) as uint + 10u,
+        _ => UINT_MAX,
+    }
 }
 
 #[deriving(PartialEq, Eq, Clone, Show)]

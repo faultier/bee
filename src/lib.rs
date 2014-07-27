@@ -105,7 +105,7 @@ pub use self::version::version;
 pub mod version {
     pub static MAJOR: uint = 0;
     pub static MINOR: uint = 1;
-    pub static PATCH: uint = 0;
+    pub static PATCH: uint = 1;
     pub static PRE: &'static str = "";
 
     /// Show version string.

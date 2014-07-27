@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::TcpStream;
 use std::io::net;
 use std::os;
+use std::slice::bytes::copy_memory;
 use std::str::from_utf8;
 use url::Url;
 
@@ -16,7 +17,7 @@ pub struct ResponseHandler {
     version: Option<http::HttpVersion>,
     status: uint,
     headers: HashMap<String, String>,
-    body: Option<String>,
+    body: Option<Vec<u8>>,
     buffer: Vec<u8>,
 }
 
@@ -64,11 +65,15 @@ impl MessageHandler for ResponseHandler {
         self.buffer.clear();
     }
 
+    fn on_headers_complete(&mut self, _: &Parser) -> bool {
+        false
+    }
+
     fn on_body(&mut self, _: &Parser, length: uint) {
         {
             let body = if length > 0 {
                 let ref st = self.buffer;
-                Some(String::from_utf8(st.clone()).unwrap())
+                Some(st.clone())
             } else {
                 None
             };
@@ -100,15 +105,38 @@ fn main() {
     let mut stream = TcpStream::connect(ip.as_slice(), 80);
     write!(stream, "GET / HTTP/1.1\r\n");
     write!(stream, "Host: {}\r\n", url.host);
-    write!(stream, "Connection: close\r\n");
     write!(stream, "\r\n");
-    let data = match stream.read_to_end() {
-        Ok(data) => data,
-        Err(e) => fail!("{}", e),
-    };
     let mut handler = ResponseHandler::new();
     let mut parser = Parser::new(ParseResponse);
-    parser.parse(data.as_slice(), &mut handler);
+    let mut buf = [0u8, ..1024];
+    let mut offset = 0u;
+    loop {
+        let len = match stream.read(buf.mut_slice_from(offset)) {
+            Ok(len) => len,
+            Err(e) => fail!("{}", e),
+        };
+        if len == 0 { continue }
+        let read = match parser.parse(buf.slice_to(offset+len), &mut handler) {
+            Ok(read) => read,
+            Err(e) => fail!("{}", e),
+        };
+        if read < offset + len {
+            let mut tmp = [0u8, ..1024];
+            copy_memory(tmp, buf.slice(read, (offset + len)));
+            offset = (offset + len) - read;
+            copy_memory(buf, tmp.mut_slice(0, offset));
+        } else {
+            offset = 0;
+        }
+        if handler.finished { break }
+    }
+    println!("{}", handler.status);
     println!("{}", handler.headers);
-    println!("{}", handler.body);
+    println!("{}", match handler.body {
+        Some(ref bytes) => match from_utf8(bytes.as_slice()) {
+            Some(s) => s,
+            None => "(charset != utf-8)",
+        },
+        None => "(no content body)",
+    });
 }
