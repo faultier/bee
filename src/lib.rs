@@ -105,8 +105,8 @@ pub use self::version::version;
 pub mod version {
     pub static MAJOR: uint = 0;
     pub static MINOR: uint = 1;
-    pub static PATCH: uint = 0;
-    pub static PRE: &'static str = "";
+    pub static PATCH: uint = 2;
+    pub static PRE: &'static str = "alpha";
 
     /// Show version string.
     pub fn version() -> String {
