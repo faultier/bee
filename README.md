@@ -14,7 +14,7 @@ extracts the following information from HTTP message.
 - Transfer-Encoding
 - Message body (Decodes chunked encoding)
 
-This library is inspired by [http-parser](https://github.com/joyent/http-parser) written in C.
+This library is inspired by [http-parser](https://github.com/joyent/http-parser) written in C. Thanks to the original authors.
 
 # Usage
 
